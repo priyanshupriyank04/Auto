@@ -1,0 +1,9 @@
+# Hyperliquid client config (mainnet read-only)
+env: mainnet
+default_symbol: BTC-USDC
+http_timeout_seconds: 10
+read_retry:
+  max_retries: 3
+  base_delay_seconds: 0.5
+  max_delay_seconds: 3.0
+log_dir: logs
