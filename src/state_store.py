@@ -33,9 +33,13 @@ class StateStore:
         Initialize StateStore: ensure parent dir exists, connect to SQLite,
         set row_factory for dict-like access, create tables and indexes.
         """
-        path = Path(db_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._db_path = path.resolve().as_posix()
+        if db_path == ":memory:":
+            self._db_path = db_path
+        else:
+            path = Path(db_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._db_path = path.resolve().as_posix()
+
         self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
         self._create_tables()

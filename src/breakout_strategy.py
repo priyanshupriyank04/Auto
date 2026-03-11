@@ -28,7 +28,7 @@ COMPONENT_NAME = "breakout_strategy"
 
 # Session: 08:00 to 15:30 IST; first trade allowed after 08:10 IST
 SESSION_START_HOUR, SESSION_START_MINUTE = 8, 0
-SESSION_END_HOUR, SESSION_END_MINUTE = 15, 30
+SESSION_END_HOUR, SESSION_END_MINUTE = 20, 50
 FIRST_TRADE_HOUR, FIRST_TRADE_MINUTE = 8, 10
 
 # State names
@@ -92,9 +92,41 @@ class DailyState:
     sl_count: int = 0
     halted_for_day: bool = False
     session_ended: bool = False
+    breakout_armed: bool = False  # True only after price is seen inside [range_low, range_high]
     last_processed_5m_open_time: int | None = None
     last_live_ts_ms: int | None = None
     event_log: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=MAX_EVENT_LOG))
+
+
+class PositionManager:
+    """Handles size calculations and exchange constraints."""
+    def __init__(self, min_order_usd: float = 10.0, pct_of_equity: float = 0.1):
+        self.min_order_usd = min_order_usd
+        self.pct_of_equity = pct_of_equity
+
+    def calculate_size(self, equity: float, price: float) -> float:
+        """Calculate order size in BTC based on user rules and account equity."""
+        # Use pct if set, otherwise use fixed min_order_usd
+        target_usd = equity * self.pct_of_equity
+        if target_usd < self.min_order_usd:
+            target_usd = self.min_order_usd
+        
+        # Note: We used to cap by equity here (min(target_usd, equity)), but 
+        # removed it per user request to ensure fixed $11 size even if local check shows 0.
+        
+        # Convert to BTC size
+        if price <= 0:
+            return 0.0
+        
+        size_btc = target_usd / price
+        
+        # Hyperliquid BTC-USDC precision is up to 5 decimals for BTC
+        # We round UP to 5 decimals to ensure we don't fall below the minimum USD requirement
+        import math
+        factor = 10**5
+        size_btc = math.ceil(size_btc * factor) / factor
+        
+        return size_btc
 
 
 class BreakoutStrategyEngine:
@@ -109,6 +141,14 @@ class BreakoutStrategyEngine:
         self._logger = _setup_logging()
         self._store = StateStore(db_path=db_path)
         self._state = DailyState()
+        # Initialized to $11 fixed, 0% equity per user request
+        self._pos_manager = PositionManager(min_order_usd=11.0, pct_of_equity=0.0)
+
+    def _round_price(self, price: float | None) -> float | None:
+        """Round price to exchange tick size (1.0 for BTC on Hyperliquid)."""
+        if price is None:
+            return None
+        return float(round(price, 0))
 
     @staticmethod
     def _now_ms() -> int:
@@ -177,8 +217,9 @@ class BreakoutStrategyEngine:
         h2 = _safe_float(curr_candle.get("high")) or 0.0
         l1 = _safe_float(prev_candle.get("low")) or 0.0
         l2 = _safe_float(curr_candle.get("low")) or 0.0
-        self._state.range_high = max(h1, h2)
-        self._state.range_low = min(l1, l2)
+        # Round range extremes to nearest integer for BTC tick size compliance
+        self._state.range_high = self._round_price(max(h1, h2))
+        self._state.range_low = self._round_price(min(l1, l2))
         self._state.range_size = self._state.range_high - self._state.range_low
         self._state.pair_first_candle = dict(prev_candle)
         self._state.pair_second_candle = dict(curr_candle)
@@ -322,80 +363,117 @@ class BreakoutStrategyEngine:
         event["pair_already_found"] = True
         return event
 
-    def _enter_virtual_long(self, price: float, timestamp_ms: int) -> dict[str, Any]:
+    def _enter_virtual_long(self, price: float, timestamp_ms: int, equity: float | None = None) -> dict[str, Any]:
         if self._state.range_low is None or self._state.range_size is None:
             return {}
+        p = self._round_price(price)
         self._state.virtual_in_trade = True
         self._state.virtual_side = "long"
-        self._state.virtual_entry = price
+        self._state.virtual_entry = p
         self._state.virtual_sl = self._state.range_low
-        self._state.virtual_tp = self._state.range_high + 4.0 * self._state.range_size
+        self._state.virtual_tp = self._round_price(self._state.range_high + 4.0 * self._state.range_size)
+        self._state.breakout_armed = False # Reset arming for next trade (if SL hit)
         self._state_transition(LONG_ACTIVE, "breakout_above_range")
-        self._record_event("paper_long_entry", {"price": price, "sl": self._state.virtual_sl, "tp": self._state.virtual_tp})
-        self._logger.info("paper_long_entry price=%.2f sl=%.2f tp=%.2f", price, self._state.virtual_sl, self._state.virtual_tp)
-        return {"signal": "long_entry", "price": price, "sl": self._state.virtual_sl, "tp": self._state.virtual_tp}
+        self._record_event("paper_long_entry", {"price": p, "sl": self._state.virtual_sl, "tp": self._state.virtual_tp})
+        self._logger.info("paper_long_entry price=%.2f sl=%.2f tp=%.2f", p, self._state.virtual_sl, self._state.virtual_tp)
+        
+        size = self._pos_manager.calculate_size(equity if equity is not None else 1000.0, p)
+        return {"signal": "long_entry", "price": p, "sl": self._state.virtual_sl, "tp": self._state.virtual_tp, "size": size}
 
-    def _enter_virtual_short(self, price: float, timestamp_ms: int) -> dict[str, Any]:
+    def _enter_virtual_short(self, price: float, timestamp_ms: int, equity: float | None = None) -> dict[str, Any]:
         if self._state.range_high is None or self._state.range_size is None:
             return {}
+        p = self._round_price(price)
         self._state.virtual_in_trade = True
         self._state.virtual_side = "short"
-        self._state.virtual_entry = price
+        self._state.virtual_entry = p
         self._state.virtual_sl = self._state.range_high
-        self._state.virtual_tp = self._state.range_low - 4.0 * self._state.range_size
+        self._state.virtual_tp = self._round_price(self._state.range_low - 4.0 * self._state.range_size)
+        self._state.breakout_armed = False # Reset arming for next trade (if SL hit)
         self._state_transition(SHORT_ACTIVE, "breakout_below_range")
-        self._record_event("paper_short_entry", {"price": price, "sl": self._state.virtual_sl, "tp": self._state.virtual_tp})
-        self._logger.info("paper_short_entry price=%.2f sl=%.2f tp=%.2f", price, self._state.virtual_sl, self._state.virtual_tp)
-        return {"signal": "short_entry", "price": price, "sl": self._state.virtual_sl, "tp": self._state.virtual_tp}
+        self._record_event("paper_short_entry", {"price": p, "sl": self._state.virtual_sl, "tp": self._state.virtual_tp})
+        self._logger.info("paper_short_entry price=%.2f sl=%.2f tp=%.2f", p, self._state.virtual_sl, self._state.virtual_tp)
+        
+        size = self._pos_manager.calculate_size(equity if equity is not None else 1000.0, p)
+        return {"signal": "short_entry", "price": p, "sl": self._state.virtual_sl, "tp": self._state.virtual_tp, "size": size}
 
     def _check_virtual_trade_exit(self, price: float, timestamp_ms: int) -> dict | None:
         """Check TP/SL; return event dict if exit, else None."""
         if not self._state.virtual_in_trade or self._state.virtual_sl is None or self._state.virtual_tp is None:
             return None
+        if self._state.range_high is None or self._state.range_low is None or (self._state.range_size or 0) <= 0:
+            return None
+
         side = self._state.virtual_side
+        p = price
+        rs = self._state.range_size
+
+        # --- Trailing SL logic (Step-wise) ---
+        # For every 1x range_size profit, move SL in favor of trade by 1x range_size
         if side == "long":
-            if price <= self._state.virtual_sl:
+            # k = 1 at 1x profit, k = 2 at 2x profit, etc.
+            k = int((p - self._state.range_high) / rs)
+            if k >= 1:
+                # new_sl: at 1x profit (105), sl moves to 100. at 2x profit (110), sl moves to 105.
+                new_sl = self._round_price(self._state.range_high + (k - 1) * rs)
+                if new_sl > self._state.virtual_sl:
+                    self._logger.info("trailing_sl_updated (long) to %.2f (milestone %dx profit)", new_sl, k)
+                    self._state.virtual_sl = new_sl
+                    self._record_event("trailing_sl_update", {"side": "long", "new_sl": new_sl, "milestone": k})
+
+        elif side == "short":
+            k = int((self._state.range_low - p) / rs)
+            if k >= 1:
+                new_sl = self._round_price(self._state.range_low - (k - 1) * rs)
+                if new_sl < self._state.virtual_sl:
+                    self._logger.info("trailing_sl_updated (short) to %.2f (milestone %dx profit)", new_sl, k)
+                    self._state.virtual_sl = new_sl
+                    self._record_event("trailing_sl_update", {"side": "short", "new_sl": new_sl, "milestone": k})
+
+        # --- Exit checks ---
+        if side == "long":
+            if p <= self._state.virtual_sl:
                 self._state.virtual_in_trade = False
                 self._state.sl_count += 1
-                self._record_event("paper_sl_hit", {"side": "long", "price": price, "sl_count": self._state.sl_count})
-                self._logger.info("paper_sl_hit long price=%.2f sl_count=%s", price, self._state.sl_count)
+                self._record_event("paper_sl_hit", {"side": "long", "price": p, "sl_count": self._state.sl_count})
+                self._logger.info("paper_sl_hit long price=%.2f sl_count=%s", p, self._state.sl_count)
                 if self._state.sl_count >= 3:
                     self._state.halted_for_day = True
                     self._state_transition(HALTED_FOR_DAY, "3_sl_hits")
-                    return {"exit": "sl", "side": "long", "price": price, "sl_count": self._state.sl_count, "halted": True}
+                    return {"exit": "sl", "side": "long", "price": p, "entry_price": self._state.virtual_entry, "sl_count": self._state.sl_count, "halted": True}
                 self._state.current_state = RANGE_DEFINED
-                return {"exit": "sl", "side": "long", "price": price, "sl_count": self._state.sl_count}
-            if price >= self._state.virtual_tp:
+                return {"exit": "sl", "side": "long", "price": p, "entry_price": self._state.virtual_entry, "sl_count": self._state.sl_count}
+            if p >= self._state.virtual_tp:
                 self._state.virtual_in_trade = False
                 self._state.tp_hit = True
                 self._state.halted_for_day = True
                 self._state_transition(HALTED_FOR_DAY, "tp_hit")
-                self._record_event("paper_tp_hit", {"side": "long", "price": price})
-                self._logger.info("paper_tp_hit long price=%.2f", price)
-                return {"exit": "tp", "side": "long", "price": price, "halted": True}
+                self._record_event("paper_tp_hit", {"side": "long", "price": p})
+                self._logger.info("paper_tp_hit long price=%.2f", p)
+                return {"exit": "tp", "side": "long", "price": p, "entry_price": self._state.virtual_entry, "halted": True}
         else:  # short
-            if price >= self._state.virtual_sl:
+            if p >= self._state.virtual_sl:
                 self._state.virtual_in_trade = False
                 self._state.sl_count += 1
-                self._record_event("paper_sl_hit", {"side": "short", "price": price, "sl_count": self._state.sl_count})
-                self._logger.info("paper_sl_hit short price=%.2f sl_count=%s", price, self._state.sl_count)
+                self._record_event("paper_sl_hit", {"side": "short", "price": p, "sl_count": self._state.sl_count})
+                self._logger.info("paper_sl_hit short price=%.2f sl_count=%s", p, self._state.sl_count)
                 if self._state.sl_count >= 3:
                     self._state.halted_for_day = True
                     self._state_transition(HALTED_FOR_DAY, "3_sl_hits")
-                    return {"exit": "sl", "side": "short", "price": price, "sl_count": self._state.sl_count, "halted": True}
+                    return {"exit": "sl", "side": "short", "price": p, "entry_price": self._state.virtual_entry, "sl_count": self._state.sl_count, "halted": True}
                 self._state.current_state = RANGE_DEFINED
-                return {"exit": "sl", "side": "short", "price": price, "sl_count": self._state.sl_count}
-            if price <= self._state.virtual_tp:
+                return {"exit": "sl", "side": "short", "price": p, "entry_price": self._state.virtual_entry, "sl_count": self._state.sl_count}
+            if p <= self._state.virtual_tp:
                 self._state.virtual_in_trade = False
                 self._state.tp_hit = True
                 self._state.halted_for_day = True
                 self._state_transition(HALTED_FOR_DAY, "tp_hit")
-                self._record_event("paper_tp_hit", {"side": "short", "price": price})
-                self._logger.info("paper_tp_hit short price=%.2f", price)
-                return {"exit": "tp", "side": "short", "price": price, "halted": True}
+                self._record_event("paper_tp_hit", {"side": "short", "price": p})
+                self._logger.info("paper_tp_hit short price=%.2f", p)
+                return {"exit": "tp", "side": "short", "price": p, "entry_price": self._state.virtual_entry, "halted": True}
         return None
 
-    def process_live_price(self, price: float, timestamp_ms: int) -> dict[str, Any]:
+    def process_live_price(self, price: float, timestamp_ms: int, equity: float | None = None) -> dict[str, Any]:
         """
         Process live price: after 08:10 IST and breakout_ready, check entry/TP/SL.
         Returns event dict for signal/trade changes.
@@ -416,19 +494,31 @@ class BreakoutStrategyEngine:
             if self._state.current_state == WEEKEND_NO_TRADE:
                 return result
 
-        if self._state.halted_for_day or self._state.session_ended:
+        if self._state.halted_for_day:
             result["halt_or_session_ended"] = True
             return result
-        if not self._state.breakout_ready or self._state.range_high is None or self._state.range_low is None:
-            result["breakout_not_ready"] = True
-            return result
-        if not self._is_after_first_trade_time_ist(dt_ist):
-            result["before_08_10_ist"] = True
-            return result
+        
+        # Session end check
         if self._is_after_session_end_ist(dt_ist):
-            self._state.session_ended = True
-            self._state_transition(SESSION_ENDED, "session_end_15_30")
-            result["session_ended"] = True
+            if not self._state.session_ended:
+                self._state.session_ended = True
+                end_time_str = f"{SESSION_END_HOUR:02d}:{SESSION_END_MINUTE:02d}"
+                self._state_transition(SESSION_ENDED, f"session_end_{end_time_str}")
+                result["session_ended"] = True
+                
+                # If we are in a trade, we must close it immediately at market
+                if self._state.virtual_in_trade:
+                    self._logger.warning("Session ended at %s IST while in trade! Triggering MARKET CLOSE.", end_time_str)
+                    self._state.virtual_in_trade = False
+                    self._record_event("market_close_session_end", {"price": p, "side": self._state.virtual_side})
+                    result["exit"] = {
+                        "exit": "market_close",
+                        "side": self._state.virtual_side,
+                        "price": p,
+                        "reason": "session_end"
+                    }
+            else:
+                result["session_ended"] = True
             return result
 
         self._state.last_live_ts_ms = timestamp_ms
@@ -439,14 +529,37 @@ class BreakoutStrategyEngine:
             result["exit"] = exit_evt
             return result
 
-        # No active trade: check breakout entry
+        # No active trade: check for arming and breakout entry
         if not self._state.virtual_in_trade:
-            if p > self._state.range_high:
-                result["entry"] = self._enter_virtual_long(p, timestamp_ms)
-            elif p < self._state.range_low:
-                result["entry"] = self._enter_virtual_short(p, timestamp_ms)
+            # Skip if no range defined yet
+            if self._state.range_low is None or self._state.range_high is None:
+                return result
+            
+            # 1. ARMING: Price must be seen inside the range to arm the trigger
+            if self._state.range_low <= p <= self._state.range_high:
+                if not self._state.breakout_armed:
+                    self._state.breakout_armed = True
+                    self._logger.info("breakout_armed: price %.2f inside range [%.2f, %.2f]", 
+                                     p, self._state.range_low, self._state.range_high)
+                    self._record_event("breakout_armed", {"price": p})
+
+            # 2. TRIGGER: Only enter if armed
+            if self._state.breakout_armed:
+                if p > self._state.range_high:
+                    result["entry"] = self._enter_virtual_long(p, timestamp_ms, equity=equity)
+                elif p < self._state.range_low:
+                    result["entry"] = self._enter_virtual_short(p, timestamp_ms, equity=equity)
+            else:
+                # Still waiting for price to enter the range
+                if self.loop_iterations_local % 40 == 0: # Log occasionally
+                     self._logger.debug("waiting_for_range_entry: price %.2f range [%.2f, %.2f]", 
+                                      p, self._state.range_low, self._state.range_high)
+
 
         return result
+
+    # Helper for logging control
+    loop_iterations_local: int = 0
 
     def get_state_snapshot(self) -> dict[str, Any]:
         """Return full strategy state as a plain dict."""
@@ -474,6 +587,7 @@ class BreakoutStrategyEngine:
             "sl_count": s.sl_count,
             "halted_for_day": s.halted_for_day,
             "session_ended": s.session_ended,
+            "breakout_armed": s.breakout_armed,
             "last_processed_5m_open_time": s.last_processed_5m_open_time,
             "last_live_ts_ms": s.last_live_ts_ms,
             "event_log": list(s.event_log),
@@ -539,6 +653,7 @@ class BreakoutStrategyEngine:
             "sl_count": s.sl_count,
             "halted_for_day": s.halted_for_day,
             "no_trade_reason": s.no_trade_reason,
+            "breakout_armed": s.breakout_armed,
             "recent_events": list(s.event_log)[-10:],
         }
         try:
@@ -551,6 +666,77 @@ class BreakoutStrategyEngine:
             self._logger.debug("persist_state: %s", s.current_state)
         except Exception as e:
             self._logger.warning("persist_state failed: %s", e)
+
+    def load_state(self) -> bool:
+        """Load internal strategy state from StateStore."""
+        try:
+            row = self._store.get_component_status(COMPONENT_NAME)
+            if not row or "meta" not in row:
+                return False
+            
+            meta = row["meta"]
+            s = self._state
+            s.current_state = meta.get("current_state", WAITING_FOR_NEW_DAY)
+            s.strategy_date_ist = meta.get("strategy_date_ist", "")
+            s.weekday_allowed = meta.get("weekday_allowed", False)
+            s.pair_found = meta.get("pair_found", False)
+            s.breakout_ready = meta.get("breakout_ready", False)
+            s.range_high = meta.get("range_high")
+            s.range_low = meta.get("range_low")
+            s.range_size = meta.get("range_size")
+            s.virtual_in_trade = meta.get("virtual_in_trade", False)
+            s.virtual_side = meta.get("virtual_side", "")
+            s.virtual_entry = meta.get("virtual_entry")
+            s.virtual_sl = meta.get("virtual_sl")
+            s.virtual_tp = meta.get("virtual_tp")
+            s.tp_hit = meta.get("tp_hit", False)
+            s.sl_count = meta.get("sl_count", 0)
+            s.halted_for_day = meta.get("halted_for_day", False)
+            s.session_ended = meta.get("session_ended", False)
+            s.breakout_armed = meta.get("breakout_armed", False)
+            s.no_trade_reason = meta.get("no_trade_reason", "")
+            
+            events = meta.get("recent_events", [])
+            s.event_log.clear()
+            s.event_log.extend(events)
+            
+            self._logger.info("load_state: recovered state for %s (armed=%s, in_trade=%s, sl=%s)", 
+                             s.strategy_date_ist, s.breakout_armed, s.virtual_in_trade, s.sl_count)
+            return True
+        except Exception as e:
+            self._logger.error("load_state failed: %s", e)
+            return False
+
+    def set_manual_range(self, high: float, low: float) -> None:
+        """Manually override the trading range (for testing/bypass)."""
+        self._state.range_high = self._round_price(high)
+        self._state.range_low = self._round_price(low)
+        if self._state.range_high is not None and self._state.range_low is not None:
+            self._state.range_size = self._state.range_high - self._state.range_low
+            self._state.pair_found = True
+            self._state.breakout_ready = True
+            
+            # Full reset for clean test: clear trade state, halt, session flags
+            self._state.virtual_in_trade = False
+            self._state.virtual_side = None
+            self._state.breakout_armed = True  # Auto-arm so breakout fires immediately
+            self._state.halted_for_day = False  # Clear halt from previous SLs
+            self._state.sl_count = 0  # Reset SL counter
+            self._state.session_ended = False  # Clear session end flag
+            self._state.current_state = RANGE_DEFINED
+            self._state.weekday_allowed = True
+            self._state.session_started = True
+            
+            # Set today's date to prevent reset_for_new_day from wiping the range
+            from datetime import datetime
+            today_ist = datetime.now(IST).strftime("%Y-%m-%d")
+            self._state.strategy_date_ist = today_ist
+            
+            self._logger.info("MANUAL RANGE RESET & ACTIVATED (ARMED): high=%.2f, low=%.2f, size=%.2f (halt/session cleared, date=%s)", 
+                             self._state.range_high, self._state.range_low, self._state.range_size, today_ist)
+
+
+
 
     def close(self) -> None:
         try:

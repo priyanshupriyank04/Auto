@@ -21,6 +21,7 @@ from src.candle_builder import CandleBuilder
 from src.paper_trade_logger import PaperTradeLogger
 from src.state_store import StateStore
 from src.ws_marketdata import HyperliquidWSMarketData
+from src.trade_logger import TradeLogger
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -111,6 +112,7 @@ def replay_today_candles(
     symbol: str,
     logger: logging.Logger,
     paper_logger: PaperTradeLogger | None = None,
+    trade_logger: TradeLogger | None = None,
 ) -> int:
     """
     Load today's (IST) closed 5m candles from DB and feed them sequentially
@@ -154,15 +156,29 @@ def replay_today_candles(
         if "interval" not in c:
             c["interval"] = "5m"
         evt = strategy.process_closed_5m_candle(c)
-        if evt.get("pair_found"):
-            logger.info("PAIR FOUND (replay) range_high=%s range_low=%s range_size=%s",
-                        evt.get("range_high"), evt.get("range_low"), evt.get("range_size"))
+        if evt.get("pair_found") or evt.get("pair_already_found"):
+            summary = strategy.get_compact_summary()
+            if summary.get("pair_found"):
+                logger.info("PAIR STATUS (replay) range_high=%s range_low=%s range_size=%s",
+                            summary.get("range_high"), summary.get("range_low"), summary.get("range_size"))
+        
         # Audit meaningful replay events (restart-safe via DB dedupe)
         if paper_logger is not None and (evt.get("new_day_reset") or evt.get("pair_found")):
             try:
                 paper_logger.log_strategy_event(evt)
             except Exception as e:
                 logger.warning("paper_logger replay audit failed: %s", e)
+        
+        if trade_logger is not None and (evt.get("pair_found") or evt.get("pair_already_found")):
+            summary = strategy.get_compact_summary()
+            if summary.get("pair_found"):
+                trade_logger.log_event("range_identified", {
+                    "range_high": summary.get("range_high"),
+                    "range_low": summary.get("range_low"),
+                    "range_size": summary.get("range_size"),
+                    "replayed": True
+                })
+                break # Log once during replay
 
     return len(today_candles)
 
@@ -176,6 +192,7 @@ def handle_strategy_event(
     store: StateStore,
     logger: logging.Logger,
     paper_logger: PaperTradeLogger | None = None,
+    trade_logger: TradeLogger | None = None,
 ) -> str | None:
     """
     Handle a strategy result dict: log human-readable lines, persist state.
@@ -229,6 +246,39 @@ def handle_strategy_event(
                 paper_logger.log_strategy_event(event)
             except Exception as e:
                 logger.warning("paper_logger failed: %s", e)
+                
+    # Human-readable JSON logging
+    if trade_logger is not None:
+        if event.get("pair_found"):
+            trade_logger.log_event("range_identified", {
+                "range_high": event.get("range_high"),
+                "range_low": event.get("range_low"),
+                "range_size": event.get("range_size"),
+                "replayed": False
+            })
+        
+        entry = event.get("entry")
+        if isinstance(entry, dict):
+            trade_logger.log_event("trade_entry", {
+                "symbol": strategy.symbol,
+                "side": "long" if entry.get("signal") == "long_entry" else "short",
+                "entry_price": entry.get("price"),
+                "size": entry.get("size"),
+                "sl": entry.get("sl"),
+                "tp": entry.get("tp"),
+                "mode": "PAPER"
+            })
+            
+        exit_evt = event.get("exit")
+        if isinstance(exit_evt, dict):
+            trade_logger.log_event("trade_exit", {
+                "symbol": strategy.symbol,
+                "side": exit_evt.get("side"),
+                "exit_type": exit_evt.get("exit"),
+                "price": exit_evt.get("price"),
+                "mode": "PAPER"
+            })
+
     return last_type
 
 
@@ -259,6 +309,7 @@ class BreakoutPaperRunner:
         self._candle_builder: CandleBuilder | None = None
         self._ws: HyperliquidWSMarketData | None = None
         self._paper_logger: PaperTradeLogger | None = None
+        self._trade_logger: TradeLogger = TradeLogger(log_dir="logs/test")
 
         self._running = False
         self._last_price: float | None = None
@@ -311,7 +362,7 @@ class BreakoutPaperRunner:
             return
         result = self._strategy.process_live_price(price, timestamp_ms)
         self.last_price_time = timestamp_ms
-        event_type = handle_strategy_event(result, self._strategy, self._store, self._logger, self._paper_logger)
+        event_type = handle_strategy_event(result, self._strategy, self._store, self._logger, self._paper_logger, self._trade_logger)
         if event_type:
             self.last_event_type = event_type
         summary = self._strategy.get_compact_summary()
@@ -333,7 +384,7 @@ class BreakoutPaperRunner:
                 pass
         self.last_candle_time = open_time
         evt = self._strategy.process_closed_5m_candle(candle)
-        event_type = handle_strategy_event(evt, self._strategy, self._store, self._logger, self._paper_logger)
+        event_type = handle_strategy_event(evt, self._strategy, self._store, self._logger, self._paper_logger, self._trade_logger)
         if event_type:
             self.last_event_type = event_type
 
@@ -398,8 +449,23 @@ class BreakoutPaperRunner:
                 self._candle_builder.bootstrap_closed_candles(interval, today_list)
                 self._logger.info("bootstrapped candle_builder with %d today %s candles", len(today_list), interval)
 
-        # Replay today's 5m candles into strategy
-        replayed = replay_today_candles(self._store, self._strategy, self.symbol, self._logger, self._paper_logger)
+        # 1. Catch up state from DB + history
+        self._strategy.load_state()
+        replayed = replay_today_candles(
+            self._store, self._strategy, self.symbol, self._logger, self._paper_logger, self._trade_logger
+        )
+
+        # Explicitly log recovered state if range is already known at start
+        state = self._strategy.get_state_snapshot()
+        if state.get("pair_found"):
+            self._trade_logger.log_event("range_recovered_at_startup", {
+                "range_high": state.get("range_high"),
+                "range_low": state.get("range_low"),
+                "range_size": state.get("range_size"),
+                "armed": state.get("breakout_armed")
+            })
+        
+        # 2. Start live feed
         self._logger.info("replay done: %d candles fed to strategy", replayed)
         # Replay run should also be audited for restart safety / traceability
         try:
@@ -458,6 +524,13 @@ class BreakoutPaperRunner:
 
                     # Feed live price to strategy every time we have a new tick
                     self._process_live_price(price, timestamp_ms)
+
+                    # Auto-shutdown: Check if session ended and we are not in trade
+                    state = self._strategy.get_state_snapshot()
+                    if state.get("session_ended") and not state.get("virtual_in_trade"):
+                        self._logger.info("Session ended for test runner. Shutting down.")
+                        self._running = False
+                        break
 
                     # Heartbeat
                     now = time.time()

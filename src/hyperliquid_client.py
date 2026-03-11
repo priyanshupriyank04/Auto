@@ -34,6 +34,14 @@ from typing import Any
 import requests
 import yaml
 from dotenv import load_dotenv
+from eth_account import Account
+import binascii
+import json
+import hashlib
+
+# Official SDK imports
+from hyperliquid.utils.signing import sign_l1_action, action_hash
+from hyperliquid.utils.types import Meta
 
 # ---------------------------------------------------------------------------
 # Endpoint / request-type constants (Hyperliquid uses POST /info with body.type)
@@ -41,6 +49,7 @@ from dotenv import load_dotenv
 # Base URL is built from config (mainnet = api.hyperliquid.xyz).
 # ---------------------------------------------------------------------------
 INFO_PATH = "/info"
+EXCHANGE_PATH = "/exchange"
 # Health: use a lightweight info request; "meta" returns asset metadata (no auth).
 HEALTH_ENDPOINT_TYPE = "meta"
 # Account summary and positions: clearinghouseState returns margin + assetPositions.
@@ -136,6 +145,27 @@ class HyperliquidClient:
             self._config.get("read_retry", {}).get("max_delay_seconds", 3.0)
         )
 
+        self._private_key = (self._env.get("HL_PRIVATE_KEY") or "").strip()
+        if self._private_key and not self._private_key.startswith("0x"):
+            self._private_key = "0x" + self._private_key
+        
+        self._is_mainnet = self._network == "mainnet"
+        
+        # Meta-data cache for asset index (needed for signing)
+        self._meta_cache: dict[str, Any] = {}
+        self._asset_to_index: dict[str, int] = {}
+        
+        # Initialize official SDK Exchange class for write operations
+        from hyperliquid.exchange import Exchange
+        if self._private_key:
+            self._exchange = Exchange(
+                Account.from_key(self._private_key),
+                base_url=self._base_url,
+                account_address=self._wallet_address
+            )
+        else:
+            self._exchange = None
+            
         self._logger = self._init_logger()
         self._session = requests.Session()
         self._session.headers.update(self._build_headers())
@@ -217,11 +247,16 @@ class HyperliquidClient:
     ) -> dict[str, Any] | list[Any]:
         """
         Centralized HTTP request with timeout, optional retries, exponential backoff + jitter.
-        Never logs request body (may contain user address); logs URL and status.
-        Returns parsed JSON; raises custom errors on non-200 or parse failure.
         """
+        if not url.startswith("http"):
+             url = f"{self._base_url}{url}"
+
         timeout = timeout if timeout is not None else self._timeout
         last_exc: Exception | None = None
+        if self._logger.isEnabledFor(logging.DEBUG):
+            # Safe to log payload for debugging order structure
+            self._logger.debug("_request payload: %s", json_body)
+
         for attempt in range(self._retry_max + 1):
             try:
                 self._logger.debug(
@@ -339,6 +374,66 @@ class HyperliquidClient:
     def _now_ms(self) -> int:
         """Current time in milliseconds since epoch."""
         return int(time.time() * 1000)
+
+    def _round_price(self, price: float | None) -> float | None:
+        """Round price to exchange tick size (1.0 for BTC on Hyperliquid)."""
+        if price is None:
+            return None
+        return float(round(price, 0))
+
+    # -------------------------------------------------------------------------
+    # Signing logic (EIP-712)
+    # -------------------------------------------------------------------------
+    def _get_asset_index(self, symbol: str) -> int:
+        """Get the asset index for a coin from meta-data."""
+        if not self._asset_to_index:
+            meta = self.get_meta()
+            universe = meta.get("universe") or []
+            for i, asset in enumerate(universe):
+                self._asset_to_index[asset["name"]] = i
+        
+        coin = self._normalize_symbol_in(symbol)
+        if coin not in self._asset_to_index:
+            raise ExchangeError(f"Asset {coin} not found in exchange universe")
+        return self._asset_to_index[coin]
+
+    def _sign_action(self, action: dict[str, Any], nonce: int) -> dict[str, Any]:
+        """
+        Sign an action using the official Hyperliquid SDK utilities.
+        """
+        if not self._private_key:
+            raise AuthError("HL_PRIVATE_KEY missing; cannot sign action")
+
+        # The SDK's sign_l1_action expects an Account object
+        wallet = Account.from_key(self._private_key)
+        
+        # The signature is: (wallet, action, active_pool, nonce, expires_after, is_mainnet)
+        signature = sign_l1_action(
+            wallet,
+            action,
+            None, # active_pool (not needed for binary hashing)
+            nonce,
+            None, # expires_after (use default or None)
+            self._is_mainnet
+        )
+        
+        return {
+            "action": action,
+            "nonce": nonce,
+            "signature": signature
+        }
+
+    # -------------------------------------------------------------------------
+    # Metadata
+    # -------------------------------------------------------------------------
+    def get_meta(self) -> dict[str, Any]:
+        """Fetch asset metadata (needed for asset indexes)."""
+        if self._meta_cache:
+             return self._meta_cache
+        url = f"{INFO_PATH}"
+        body = {"type": "meta"}
+        self._meta_cache = self._request("POST", url, json_body=body)
+        return self._meta_cache
 
     # -------------------------------------------------------------------------
     # Health
@@ -668,12 +763,57 @@ class HyperliquidClient:
         client_order_id: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Place an order. Not implemented; for future use."""
-        raise NotImplementedError("place_order is not implemented")
+        """
+        Place a real order on the exchange using the official SDK.
+        """
+        if not self._exchange:
+            raise AuthError("Exchange not initialized; check private key")
+            
+        is_buy = side.lower() in ["buy", "long"]
+        coin = self._normalize_symbol_in(symbol)
+        
+        # The SDK takes (coin, is_buy, sz, limit_px, order_type, reduce_only, cloid)
+        if order_type.lower() == "limit":
+            hl_order_type = {"limit": {"tif": "Gtc"}}
+            final_px = float(price) if price else 0.0
+        else:
+            hl_order_type = {"limit": {"tif": "Ioc"}}
+            # For Market orders, we use the price with 5% slippage to guarantee the fill
+            if price:
+                final_px = float(price) * (1.05 if is_buy else 0.95)
+            else:
+                final_px = 0.0 # This might fail if the SDK doesn't fetch mid price
+        
+        self._logger.info("Placing %s order for %s: qty=%s, limit_px=%f (market slippage applied)", 
+                         side.upper(), coin, qty, final_px)
+        
+        return self._exchange.order(
+            name=coin,
+            is_buy=is_buy,
+            sz=float(qty),
+            limit_px=self._round_price(final_px),
+            order_type=hl_order_type,
+            reduce_only=reduce_only,
+            cloid=client_order_id
+        )
 
     def cancel_order(self, order_id: str, symbol: str | None = None) -> dict[str, Any]:
-        """Cancel a single order by order_id. Not implemented; for future use."""
-        raise NotImplementedError("cancel_order is not implemented")
+        """Cancel an order by its ID using the official SDK."""
+        if not self._exchange:
+            raise AuthError("Exchange not initialized; check private key")
+            
+        coin = self._normalize_symbol_in(symbol) if symbol else ""
+        return self._exchange.cancel(name=coin, oid=int(order_id))
+
+    def set_leverage(self, leverage: int, symbol: str, is_cross: bool = True) -> dict[str, Any]:
+        """Set leverage for a symbol using the official SDK."""
+        if not self._exchange:
+            raise AuthError("Exchange not initialized; check private key")
+            
+        coin = self._normalize_symbol_in(symbol)
+        self._logger.info("Setting leverage for %s to %dx (%s)", coin, leverage, "Cross" if is_cross else "Isolated")
+        
+        return self._exchange.update_leverage(leverage, coin, is_cross)
 
     def cancel_all(self, symbol: str | None = None) -> dict[str, Any]:
         """Cancel all open orders, optionally for a symbol. Not implemented; for future use."""
