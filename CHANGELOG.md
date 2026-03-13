@@ -8,6 +8,8 @@ All notable changes to the Hyperliquid Breakout Strategy bot.
 - **Step-wise Trailing Stop Loss**: Added a dynamic trailing SL. For every 1x range size of profit achieved, the Stop Loss "inches up" (for longs) or "inches down" (for shorts) by one range size to lock in profits.
 - **TradeLogger (JSON Reporting)**: Created a new `TradeLogger` class and `logs/trades/` directory. The bot now generates human-readable, daily JSON files (`YYYY-MM-DD_trades.json`) that audit range identification, trade entries, and trade exits.
 - **Session Auto-Close**: Added logic to `process_live_price` to emit a `market_close` signal at 15:30 IST if a trade is active, ensuring no positions are carried overnight.
+- **First Trade Auto-Arm**: Updated range identification to automatically arm the strategy for the first trade of the session. This ensures that the very first breakout is captured even if the price is already outside the range when the morning box is defined.
+- **High-Frequency Persistence**: Enhanced the state persistence logic to save the `virtual_sl` immediately when it trails and the `breakout_armed` status when it changes. This ensures 100% crash recovery for trailing stops and arming.
 - **Auto-Shutdown**: The live runner and paper runner now detect when the session has ended and all positions are closed, allowing them to shut down cleanly without manual intervention.
 - **Paper Trading Synchronization**: Updated `run_breakout_paper.py` to match the live runner's logic, including historical replay, trailing stop-losses, and breakout arming.
 - **Human-Readable Test Logs**: Added `TradeLogger` to the paper runner, directing test logs to `logs/test/` to keep them separate from live trading logs.
@@ -27,7 +29,7 @@ All notable changes to the Hyperliquid Breakout Strategy bot.
 - **Re-entry Prevention**: Modified trade entry logic to reset the `breakout_armed` flag immediately. If a trade is stopped out, the price must return *inside* the range to arm the next trade.
 - **Daily PnL Logs**: Updated `PnLLogger` to generate date-based CSV files (e.g., `logs/pnl_YYYY-MM-DD.csv`) instead of a single `pnl.csv`. This prevents log growth issues and organizes trade data by day.
 - **Session Times**: Standardized session end time to **15:30 IST** across the strategy engine and documentation.
-- **Documentation Sync**: Fully updated `LIVE_STRATEGY.md` to align with the current codebase, including constants, file structure, and diagnostic tools.
+- **Documentation Sync**: Fully updated `LIVE_STRATEGY.md` and `CHANGELOG.md` to align with the current codebase, including the updated arming logic, constants, and file structure.
 
 ## [Fixed]
 - **Late-Start Range Discovery**: Fixed the issue where starting the bot in the afternoon would cause it to miss the morning 08:00 AM IST range.

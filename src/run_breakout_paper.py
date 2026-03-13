@@ -210,6 +210,10 @@ def handle_strategy_event(
         logger.info("PAIR FOUND range_high=%s range_low=%s range_size=%s",
                     event.get("range_high"), event.get("range_low"), event.get("range_size"))
         last_type = "pair_found"
+    if event.get("armed_update"):
+        last_type = "armed_update"
+    if event.get("trailing_update"):
+        last_type = "trailing_update"
     entry = event.get("entry")
     if isinstance(entry, dict):
         sig = entry.get("signal")

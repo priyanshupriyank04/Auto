@@ -93,5 +93,58 @@ class TestRangeCalculation(unittest.TestCase):
         self.assertEqual(res.get("range_low"), 95.0)
         print("[SUCCESS] Red-to-Green range correctly identified.")
 
+    def test_auto_arm_on_first_identification(self):
+        """Verify that the breakout trigger is auto-armed when the first range is identified."""
+        # Candle 1: Green
+        candle1 = {"open": 100, "close": 110, "high": 115, "low": 95, "open_time": 1773196200000}
+        # Candle 2: Red
+        candle2 = {"open": 110, "close": 105, "high": 112, "low": 102, "open_time": 1773196500000}
+
+        self.strategy.process_closed_5m_candle(candle1)
+        res = self.strategy.process_closed_5m_candle(candle2)
+
+        self.assertTrue(res.get("pair_found"))
+        self.assertTrue(self.strategy._state.breakout_armed)
+        print("[SUCCESS] Breakout trigger auto-armed on first identification.")
+
+    def test_rearm_required_after_sl(self):
+        """Verify that subsequent trades require range entry to re-arm after a trade exit."""
+        # 1. Setup range (auto-arms for first trade)
+        candle1 = {"open": 100, "close": 110, "high": 115, "low": 95, "open_time": 1773196200000}
+        candle2 = {"open": 110, "close": 105, "high": 112, "low": 102, "open_time": 1773196500000}
+        self.strategy._state.strategy_date_ist = "2026-03-11" # Mock date
+        
+        self.strategy.process_closed_5m_candle(candle1)
+        self.strategy.process_closed_5m_candle(candle2)
+        
+        # 2. Trigger trade (Long) 
+        # Range High is 115.0. Price 120.0 triggers entry because it was auto-armed.
+        entry_res = self.strategy.process_live_price(120.0, 1773196600000)
+        self.assertIn("entry", entry_res)
+        self.assertFalse(self.strategy._state.breakout_armed) # Reset after entry
+        
+        # 3. Hit SL
+        # Range Low is 95.0. Price 90.0 hits SL.
+        exit_res = self.strategy.process_live_price(90.0, 1773196700000)
+        self.assertIn("exit", exit_res)
+        self.assertEqual(exit_res["exit"]["exit"], "sl")
+        
+        # 4. Verify NOT armed
+        self.assertFalse(self.strategy._state.breakout_armed)
+        
+        # 5. Price above range again (120) - should NOT trigger entry because not armed
+        mid_res = self.strategy.process_live_price(120.0, 1773196800000)
+        self.assertNotIn("entry", mid_res)
+        
+        # 6. Price enters range (100) - should arm
+        arm_res = self.strategy.process_live_price(100.0, 1773196900000)
+        self.assertTrue(self.strategy._state.breakout_armed)
+        
+        # 7. Price breaks out again (120) - should trigger entry
+        reentry_res = self.strategy.process_live_price(120.0, 1773197000000)
+        self.assertIn("entry", reentry_res)
+        
+        print("[SUCCESS] Correct arming behavior verified for subsequent trades.")
+
 if __name__ == "__main__":
     unittest.main()

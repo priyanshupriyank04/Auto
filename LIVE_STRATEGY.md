@@ -98,6 +98,9 @@ The strategy has a **two-step trigger** mechanism to prevent false breakouts:
 ### Step 1: Arming 🔓
 The live price must first be observed **inside the range box** (between Range Low and Range High). This sets `breakout_armed = True`.
 
+> [!TIP]
+> **First Trade Auto-Arm**: For the very first trade of the session (when the range is first identified), the strategy **auto-arms** immediately. This ensures that if the price is already outside the range when the box is drawn, the bot takes the trade instantly.
+
 ### Step 2: Trigger 🎯
 Only after the trigger is armed, if the price moves **outside the box**, a trade is placed.
 
@@ -386,6 +389,7 @@ range_size = range_high - range_low
 
 ```python
 # Step 1: Arming
+# Note: breakout_armed is set to True automatically when range is first identified
 if range_low <= price <= range_high:
     breakout_armed = True
 
@@ -458,13 +462,18 @@ def _round_price(price):
 
 ### 16.1 StateStore (SQLite)
 
-The strategy state is persisted to `data/bot_state.db` after every trade event. On restart:
+The strategy state is persisted to `data/bot_state.db` using **High-Frequency Persistence**. Unlike traditional systems that save on a timer, this bot saves state immediately whenever a critical event occurs:
 
-1. **`load_state()`** — Recovers the most recent state snapshot for today's IST date
-2. **`_replay_today_candles()`** — Fetches all closed 5m candles from the DB for today and re-processes them through the strategy engine
-3. **`bootstrap_closed_candles()`** — Pre-loads the CandleBuilder with historical candles so it doesn't re-emit already-processed candles
+1. **Trade Lifecycle**: Entry, Exit (SL/TP/Market), and Daily Halt.
+2. **Trailing SL Updates**: Every time the Stop Loss "inches forward" to lock in profit, the new level is saved.
+3. **Arming Status**: The moment price enters the range and "arms" the trigger, the status is saved.
 
-This means the bot can be **stopped and restarted at any time** without losing its position in the trading day.
+On restart:
+1. **`load_state()`** — Recovers the most recent state snapshot (including precisely where the SL had trailed to).
+2. **`_replay_today_candles()`** — Fetches all closed 5m candles from the DB for today and re-processes them through the strategy engine to reconstruct the range.
+3. **`bootstrap_closed_candles()`** — Pre-loads the CandleBuilder with historical candles so it doesn't re-emit already-processed candles.
+
+This means the bot can be **stopped and restarted at any time** without losing its position in the trading day or forgetting its "locked-in" profit protection.
 
 ### 16.2 State Fields Persisted
 

@@ -7,7 +7,7 @@ Strategy rules (PineScript-aligned):
 - Trades/signals only after 08:10 IST
 - First valid opposite-color pair (green→red or red→green) after 08:00 defines range
 - Breakout above range_high = paper long; below range_low = paper short
-- TP = 1x per day then halt; SL = 3x then halt
+- TP = 1x per day ( 4 times range) then halt; SL = 3x then halt
 - No live orders; state and signal generation only
 """
 
@@ -143,7 +143,7 @@ class BreakoutStrategyEngine:
         self._state = DailyState()
         self._target_date = target_date  # If set, strictly trade this YYYY-MM-DD only
         # Initialized to $11 fixed, 0% equity per user request
-        self._pos_manager = PositionManager(min_order_usd=11.0, pct_of_equity=0.0)
+        self._pos_manager = PositionManager(min_order_usd=12.0, pct_of_equity=0.0)
 
     def _get_persistence_key(self, date_ist: str) -> str:
         """Dynamic key based on date for state isolation."""
@@ -231,6 +231,10 @@ class BreakoutStrategyEngine:
         self._state.range_size = self._state.range_high - self._state.range_low
         self._state.pair_first_candle = dict(prev_candle)
         self._state.pair_second_candle = dict(curr_candle)
+        # First range identification: Auto-arm for first trade
+        self._state.breakout_armed = True
+        self._logger.info("breakout_armed: first morning range identified [%.2f, %.2f]", 
+                         self._state.range_low, self._state.range_high)
 
     def _record_event(self, event_type: str, payload: dict | None = None) -> None:
         entry = {"type": event_type, "ts_ms": self._now_ms()}
@@ -441,6 +445,7 @@ class BreakoutStrategyEngine:
                     self._logger.info("trailing_sl_updated (long) to %.2f (milestone %dx profit)", new_sl, k)
                     self._state.virtual_sl = new_sl
                     self._record_event("trailing_sl_update", {"side": "long", "new_sl": new_sl, "milestone": k})
+                    return {"trailing_update": True, "side": "long", "new_sl": new_sl}
 
         elif side == "short":
             k = int((self._state.range_low - p) / rs)
@@ -450,6 +455,7 @@ class BreakoutStrategyEngine:
                     self._logger.info("trailing_sl_updated (short) to %.2f (milestone %dx profit)", new_sl, k)
                     self._state.virtual_sl = new_sl
                     self._record_event("trailing_sl_update", {"side": "short", "new_sl": new_sl, "milestone": k})
+                    return {"trailing_update": True, "side": "short", "new_sl": new_sl}
 
         # --- Exit checks ---
         if side == "long":
@@ -569,6 +575,7 @@ class BreakoutStrategyEngine:
                     self._logger.info("breakout_armed: price %.2f inside range [%.2f, %.2f]", 
                                      p, self._state.range_low, self._state.range_high)
                     self._record_event("breakout_armed", {"price": p})
+                    result["armed_update"] = True
 
             # 2. TRIGGER: Only enter if armed
             if self._state.breakout_armed:

@@ -399,7 +399,7 @@ class BreakoutLiveRunner:
                     except Exception as e:
                         self._logger.warning("Failed to update heartbeat file: %s", e)
                 
-                if res.get("entry") or res.get("exit"):
+                if res.get("entry") or res.get("exit") or res.get("trailing_update") or res.get("armed_update"):
                     self._handle_signal(res)
                     self._strategy.persist_state()
                 
