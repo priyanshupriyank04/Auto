@@ -28,7 +28,7 @@ COMPONENT_NAME = "breakout_strategy"
 
 # Session: 08:00 to 15:30 IST; first trade allowed after 08:10 IST
 SESSION_START_HOUR, SESSION_START_MINUTE = 8, 0
-SESSION_END_HOUR, SESSION_END_MINUTE = 20, 50
+SESSION_END_HOUR, SESSION_END_MINUTE = 15, 30
 FIRST_TRADE_HOUR, FIRST_TRADE_MINUTE = 8, 10
 
 # State names
@@ -135,14 +135,21 @@ class BreakoutStrategyEngine:
     defines range; breakout long/short with TP/SL and daily halt rules.
     """
 
-    def __init__(self, symbol: str = "BTC-USDC", db_path: str = "data/bot_state.db") -> None:
+    def __init__(self, symbol: str = "BTC-USDC", db_path: str = "data/bot_state.db", target_date: str | None = None) -> None:
         self.symbol = symbol
         self._tz = IST
         self._logger = _setup_logging()
         self._store = StateStore(db_path=db_path)
         self._state = DailyState()
+        self._target_date = target_date  # If set, strictly trade this YYYY-MM-DD only
         # Initialized to $11 fixed, 0% equity per user request
         self._pos_manager = PositionManager(min_order_usd=11.0, pct_of_equity=0.0)
+
+    def _get_persistence_key(self, date_ist: str) -> str:
+        """Dynamic key based on date for state isolation."""
+        if not date_ist:
+            return COMPONENT_NAME
+        return f"{COMPONENT_NAME}_{date_ist}"
 
     def _round_price(self, price: float | None) -> float | None:
         """Round price to exchange tick size (1.0 for BTC on Hyperliquid)."""
@@ -160,7 +167,8 @@ class BreakoutStrategyEngine:
 
     def _is_weekday_ist(self, dt_ist) -> bool:
         """Monday=0, Sunday=6. Weekday = 0-4."""
-        return dt_ist.weekday() < 5
+        # return dt_ist.weekday() < 5
+        return True
 
     def _minutes_since_midnight_ist(self, dt_ist) -> int:
         return dt_ist.hour * 60 + dt_ist.minute
@@ -240,6 +248,11 @@ class BreakoutStrategyEngine:
         """Compute IST date from UTC ms and reset all daily state."""
         dt_ist = self._utc_ms_to_ist_datetime(dt_utc_ms)
         date_str = dt_ist.strftime("%Y-%m-%d")
+        
+        # If a target date is forced, ignore all other dates
+        if self._target_date and date_str != self._target_date:
+            return
+
         if self._state.strategy_date_ist == date_str:
             return
         self._logger.info("reset_for_new_day: IST date=%s", date_str)
@@ -291,6 +304,14 @@ class BreakoutStrategyEngine:
 
         dt_ist = self._utc_ms_to_ist_datetime(open_time_int)
         date_str = dt_ist.strftime("%Y-%m-%d")
+
+        # TARGET DATE FILTER: If we have a target date, strictly skip anything else
+        if self._target_date and date_str != self._target_date:
+            self._logger.debug("skipping_candle_wrong_date open_time=%s date=%s target=%s", 
+                               open_time_int, date_str, self._target_date)
+            event["processed"] = False
+            event["reason"] = "wrong_date"
+            return event
 
         # New day reset if IST date changed
         if self._state.strategy_date_ist != date_str:
@@ -488,6 +509,12 @@ class BreakoutStrategyEngine:
         dt_ist = self._utc_ms_to_ist_datetime(timestamp_ms)
         date_str = dt_ist.strftime("%Y-%m-%d")
 
+        # TARGET DATE FILTER
+        if self._target_date and date_str != self._target_date:
+            result["processed"] = False
+            result["reason"] = "wrong_date"
+            return result
+
         if self._state.strategy_date_ist != date_str:
             self.reset_for_new_day(timestamp_ms)
             result["new_day_reset"] = True
@@ -657,20 +684,25 @@ class BreakoutStrategyEngine:
             "recent_events": list(s.event_log)[-10:],
         }
         try:
+            key = self._get_persistence_key(s.strategy_date_ist)
             self._store.upsert_component_status(
-                component_name=COMPONENT_NAME,
+                component_name=key,
                 status=s.current_state,
                 last_update_ts=self._now_ms(),
                 meta=meta,
             )
-            self._logger.debug("persist_state: %s", s.current_state)
+            self._logger.debug("persist_state: %s (%s)", s.current_state, key)
         except Exception as e:
             self._logger.warning("persist_state failed: %s", e)
 
-    def load_state(self) -> bool:
+    def load_state(self, date_ist: str | None = None) -> bool:
         """Load internal strategy state from StateStore."""
         try:
-            row = self._store.get_component_status(COMPONENT_NAME)
+            # Use provided date, or internal target_date, or default global key
+            effective_date = date_ist or self._target_date
+            key = self._get_persistence_key(effective_date)
+            
+            row = self._store.get_component_status(key)
             if not row or "meta" not in row:
                 return False
             

@@ -1,6 +1,6 @@
 """
 PnL CSV Logger — Records every trade with entry, exit, reason, and profit/loss.
-Output: logs/pnl.csv
+Output: logs/pnl_YYYY-MM-DD.csv
 """
 import csv
 import os
@@ -9,7 +9,6 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 PNL_DIR = "logs"
-PNL_FILE = os.path.join(PNL_DIR, "pnl.csv")
 
 HEADERS = [
     "date", "time_ist", "symbol", "direction",
@@ -19,16 +18,16 @@ HEADERS = [
 
 
 class PnLLogger:
-    """Append-only CSV logger for completed trades."""
+    """Append-only CSV logger for completed trades with daily files."""
 
-    def __init__(self, path: str = PNL_FILE):
-        self._path = path
-        os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
-        # Write header if file is new
-        if not os.path.exists(self._path) or os.path.getsize(self._path) == 0:
-            with open(self._path, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(HEADERS)
+    def __init__(self, log_dir: str = PNL_DIR):
+        self._log_dir = log_dir
+        os.makedirs(self._log_dir, exist_ok=True)
+
+    def _get_path(self) -> str:
+        """Returns the CSV path for the current IST day."""
+        date_str = datetime.now(IST).strftime("%Y-%m-%d")
+        return os.path.join(self._log_dir, f"pnl_{date_str}.csv")
 
     def log_trade(
         self,
@@ -41,10 +40,17 @@ class PnLLogger:
         notes: str = "",
     ) -> dict:
         """
-        Log a completed trade to the CSV.
+        Log a completed trade to a daily CSV.
         Returns a dict with the calculated PnL.
         """
         now_ist = datetime.now(IST)
+        path = self._get_path()
+
+        # Write header if file is new or empty
+        if not os.path.exists(path) or os.stat(path).st_size == 0:
+            with open(path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(HEADERS)
 
         # Calculate PnL
         if direction == "long":
@@ -70,7 +76,7 @@ class PnLLogger:
             notes,
         ]
 
-        with open(self._path, "a", newline="") as f:
+        with open(path, "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(row)
 

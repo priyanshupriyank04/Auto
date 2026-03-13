@@ -13,12 +13,21 @@ All notable changes to the Hyperliquid Breakout Strategy bot.
 - **Human-Readable Test Logs**: Added `TradeLogger` to the paper runner, directing test logs to `logs/test/` to keep them separate from live trading logs.
 - **Range Calculation Unit Test**: Created `tests/test_range_calculation.py` to programmatically verify that the strategy correctly identifies the morning range based on candle colors and price extremes.
 - **Order Lifecycle Test**: Created `tests/test_order_lifecycle.py` to verify API connectivity and authentication by placing a distant, safe limit order and then immediately cancelling it.
+- **Morning Range Debugger**: Created `tests/debug_morning_range.py` to inspect and verify the candles used for range calculation directly from the SQLite database.
+- **Session Reset Tool**: Created `tests/reset_session.py` to clear the persisted strategy state and trade history for the current day, allowing for a fresh start or logic switching (e.g., exiting Test Mode).
+- **Heartbeat Log File**: Implemented `logs/heartbeat.txt` in the live runner. This file is updated every 5 seconds with a single-line summary of the current price, range, and trade status for quick human inspection.
+- **1m Data Fetcher**: Created `tests/fetch_1m_data.py` to fetch historical 1-minute OHLCV candles for a specific date and save them to CSV.
+- **Daily Backtester**: Created `tests/backtest_day.py` to simulate the live strategy on historical 1m CSV data, generating PnL and trade audit logs within the `tests/` directory.
+- **Custom Trade Date**: Added `DATE_TO_TRADE` configuration to the live runner. This allows forcing the bot to trade a specific day while isolating the state in the database (`breakout_strategy_YYYY-MM-DD`).
 - **State Recovery**: Added `load_state` to the strategy engine to restore `sl_count`, `tp_hit`, and `breakout_armed` status from the SQLite database upon restart.
 
 ## [Changed]
 - **Market Order Execution**: Switched all entry and exit orders from `limit` to `market`. This ensures guaranteed fills during fast-moving breakouts and protects against slippage on Stop Loss hits.
 - **Session End Handling**: Updated the 15:30 IST check to proactively trigger a Market Sell/Buy if in a trade, rather than simply stopping the strategy logic.
 - **Re-entry Prevention**: Modified trade entry logic to reset the `breakout_armed` flag immediately. If a trade is stopped out, the price must return *inside* the range to arm the next trade.
+- **Daily PnL Logs**: Updated `PnLLogger` to generate date-based CSV files (e.g., `logs/pnl_YYYY-MM-DD.csv`) instead of a single `pnl.csv`. This prevents log growth issues and organizes trade data by day.
+- **Session Times**: Standardized session end time to **15:30 IST** across the strategy engine and documentation.
+- **Documentation Sync**: Fully updated `LIVE_STRATEGY.md` to align with the current codebase, including constants, file structure, and diagnostic tools.
 
 ## [Fixed]
 - **Late-Start Range Discovery**: Fixed the issue where starting the bot in the afternoon would cause it to miss the morning 08:00 AM IST range.

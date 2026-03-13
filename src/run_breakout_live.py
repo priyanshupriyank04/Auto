@@ -38,8 +38,11 @@ HEARTBEAT_INTERVAL_SEC = 5.0
 EQUITY_REFRESH_INTERVAL_SEC = 60.0 # Fetch equity every minute
 
 # TEST MODE: Set to True to override range manually
-TEST_MODE = True
+TEST_MODE = False
 TEST_RANGE = {"high": 70200.0, "low": 70100.0}
+
+# DATE TO TRADE: Set to "YYYY-MM-DD" to force a specific day, or None for auto-current
+DATE_TO_TRADE = "2026-03-14"
 
 def _setup_logging() -> logging.Logger:
     log = logging.getLogger("run_breakout_live")
@@ -77,7 +80,7 @@ class BreakoutLiveRunner:
         self._logger = _setup_logging()
         
         self._store = StateStore(db_path=db_path)
-        self._strategy = BreakoutStrategyEngine(symbol=symbol, db_path=db_path)
+        self._strategy = BreakoutStrategyEngine(symbol=symbol, db_path=db_path, target_date=DATE_TO_TRADE)
         self._candle_builder = CandleBuilder(symbol=symbol)
         self._ws = HyperliquidWSMarketData(symbol=symbol)
         self._client = HyperliquidClient()
@@ -88,6 +91,10 @@ class BreakoutLiveRunner:
         self._last_equity_fetch = 0.0
         self._last_processed_5m_open_time = None
         self._pnl_logger = PnLLogger()
+        
+        # Heartbeat file
+        self.heartbeat_file = "logs/heartbeat.txt"
+        os.makedirs("logs", exist_ok=True)
         
         # Track current trade for PnL
         self._current_entry_price = None
@@ -238,9 +245,9 @@ class BreakoutLiveRunner:
     def _replay_today_candles(self):
         """Fetch today's candles from DB and feed to strategy + bootstrap candle builder."""
         now_ms = int(time.time() * 1000)
-        today_date = datetime.fromtimestamp(now_ms / 1000.0, tz=timezone.utc).astimezone(IST).strftime("%Y-%m-%d")
+        today_date = DATE_TO_TRADE or datetime.fromtimestamp(now_ms / 1000.0, tz=timezone.utc).astimezone(IST).strftime("%Y-%m-%d")
         
-        self._logger.info("Replaying today's candles (IST date %s) to catch up state...", today_date)
+        self._logger.info("Replaying candles for date %s to catch up state...", today_date)
         
         # 1. Bootstrap CandleBuilder for both 1m and 5m so it doesn't re-emit them
         for interval in ("5m", "1m"):
@@ -298,7 +305,8 @@ class BreakoutLiveRunner:
                                  break 
 
     def start(self):
-        self._logger.info("Starting LIVE runner for %s", self.symbol)
+        trade_date_label = DATE_TO_TRADE or "CURRENT DATE"
+        self._logger.info("Starting LIVE runner for %s (Target Day: %s)", self.symbol, trade_date_label)
         
         # 0. Set leverage to 1x for safety
         try:
@@ -382,6 +390,14 @@ class BreakoutLiveRunner:
                         float(price), range_low, range_high,
                         armed, in_trade, self._equity
                     )
+                    
+                    # Update heartbeat file (overwrite single line)
+                    try:
+                        with open(self.heartbeat_file, "w") as f:
+                            timestamp = datetime.now(IST).strftime("%H:%M:%S")
+                            f.write(f"[{timestamp}] BTC: ${float(price):.2f} | Range: [{range_low:.0f}-{range_high:.0f}] | Status: {state.get('current_state')} | Armed: {armed} | Side: {in_trade} | SLs: {state.get('sl_count')}/3 | TP: {'Hit' if state.get('tp_hit') else 'None'} | Halted: {'Yes' if state.get('halted_for_day') else 'No'} | Eq: ${self._equity:.2f}\n")
+                    except Exception as e:
+                        self._logger.warning("Failed to update heartbeat file: %s", e)
                 
                 if res.get("entry") or res.get("exit"):
                     self._handle_signal(res)

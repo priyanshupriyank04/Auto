@@ -9,3 +9,9 @@ logs/
 __pycache__/
 .venv/
 *.pyc
+
+tests/charts/
+tests/*.csv
+tests/*.json
+
+.DS_Store

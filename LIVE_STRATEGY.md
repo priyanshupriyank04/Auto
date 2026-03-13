@@ -30,12 +30,12 @@ The strategy has **no discretionary judgment**. Every rule — from range identi
 |-----------|-------|
 | **Session Open** | 08:00 IST |
 | **First Trade Allowed** | 08:10 IST |
-| **Session Close** | 20:30 IST |
+| **Session Close** | 15:30 IST |
 | **Trading Days** | Monday – Friday (weekdays only) |
 
 The bot wakes up at **08:00 IST** and begins scanning. No trades are placed before **08:10 IST** — this 10-minute buffer ensures at least two 5-minute candles have closed before any range can be defined.
 
-If a trade is still open when the session ends at **20:30 IST**, it is **forcibly closed at market price**.
+If a trade is still open when the session ends at **15:30 IST**, it is **forcibly closed at market price**.
 
 ---
 
@@ -189,7 +189,7 @@ The strategy enforces strict daily loss limits:
 |------|---------|--------|
 | **TP Hit** | 1 take-profit in a day | **Halt for day** — no more trades |
 | **3 SL Hits** | 3 stop-losses in a day | **Halt for day** — no more trades |
-| **Session End** | Clock hits 20:30 IST | **Force close** any open position |
+| **Session End** | Clock hits 15:30 IST | **Force close** any open position |
 
 ### What happens after an SL?
 
@@ -237,7 +237,7 @@ All exit orders use `reduce_only=True`, which means the exchange guarantees the 
              ┃ 
              ┃ Strategy returns to RANGE_DEFINED. Waits for re-arm.
              ┃ ...
-20:30 IST    ┃ Session ends. Any open position is force-closed. Bot goes to sleep.
+15:30 IST    ┃ Session ends. Any open position is force-closed. Bot goes to sleep.
 ```
 
 ---
@@ -289,7 +289,8 @@ All exit orders use `reduce_only=True`, which means the exchange guarantees the 
 | **CandleBuilder** | `src/candle_builder.py` | Aggregates raw ticks into 1m and 5m OHLCV candles in real-time. |
 | **StateStore** | `src/state_store.py` | SQLite persistence layer. Stores strategy state, closed candles, and metadata. Enables crash recovery. |
 | **TradeLogger** | `src/trade_logger.py` | JSON logger for daily trade events (`logs/trades/YYYY-MM-DD_trades.json`). |
-| **PnLLogger** | `src/pnl_logger.py` | CSV logger for completed trades with P&L calculation (`logs/pnl.csv`). |
+| **PnLLogger** | `src/pnl_logger.py` | CSV logger for completed trades with P&L calculation (`logs/pnl_YYYY-MM-DD.csv`). |
+| **Heartbeat** | `logs/heartbeat.txt` | Single-line live status summary updated every 5 seconds for easy monitoring. |
 | **PositionManager** | `src/breakout_strategy.py` | Position sizing calculator. Currently hardcoded to ~$11 fixed per trade. |
 
 ---
@@ -312,9 +313,9 @@ stateDiagram-v2
     SHORT_ACTIVE --> RANGE_DEFINED : SL hit (count < 3)
     LONG_ACTIVE --> HALTED_FOR_DAY : TP hit or 3rd SL
     SHORT_ACTIVE --> HALTED_FOR_DAY : TP hit or 3rd SL
-    LONG_ACTIVE --> SESSION_ENDED : 20:30 IST (force close)
-    SHORT_ACTIVE --> SESSION_ENDED : 20:30 IST (force close)
-    RANGE_DEFINED --> SESSION_ENDED : 20:30 IST
+    LONG_ACTIVE --> SESSION_ENDED : 15:30 IST (force close)
+    SHORT_ACTIVE --> SESSION_ENDED : 15:30 IST (force close)
+    RANGE_DEFINED --> SESSION_ENDED : 15:30 IST
     HALTED_FOR_DAY --> [*]
     SESSION_ENDED --> [*]
     WEEKEND_NO_TRADE --> [*]
@@ -341,7 +342,7 @@ stateDiagram-v2
 5. BreakoutStrategyEngine.process_live_price(price, ts_ms, equity)
         │
         ├─── Day reset check (IST date change)
-        ├─── Session end check (>= 20:30 IST → force close)
+        ├─── Session end check (>= 15:30 IST → force close)
         ├─── Halted check (TP hit or 3 SLs → skip)
         ├─── Exit check (SL/TP on active trade)
         ├─── Arming check (price inside range?)
@@ -472,18 +473,14 @@ This means the bot can be **stopped and restarted at any time** without losing i
     "strategy_date_ist": "2026-03-11",
     "range_high": 70280.0,
     "range_low": 70050.0,
-    "range_size": 230.0,
-    "breakout_armed": True,
-    "virtual_in_trade": True,
-    "virtual_side": "long",
-    "virtual_entry": 70300.0,
-    "virtual_sl": 70280.0,
-    "virtual_tp": 71200.0,
-    "sl_count": 1,
-    "halted_for_day": False,
-    "session_ended": False
+    ...
 }
 ```
+
+### 16.3 Custom Trade Date & State Isolation
+The bot supports a `DATE_TO_TRADE` override (Section 18.2). When a specific date is set:
+- **Persistence Isolation**: The bot uses a unique database key `breakout_strategy_YYYY-MM-DD`. This ensures that testing on one day never overwrites or "halts" the bot for a future day.
+- **Strict Data Filtering**: The strategy will only process candles and price ticks that match exactly with the target date in IST.
 
 ---
 
@@ -524,7 +521,7 @@ Every event is logged as a JSON entry with full exchange response:
 }
 ```
 
-### 17.3 PnL Ledger (`logs/pnl.csv`)
+### 17.3 PnL Ledger (`logs/pnl_YYYY-MM-DD.csv`)
 
 Every completed trade (entry + exit) is logged to a CSV for easy spreadsheet analysis:
 
@@ -543,7 +540,7 @@ date,time_ist,symbol,direction,entry_price,exit_price,size_btc,exit_reason,pnl_u
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `SESSION_START_HOUR/MINUTE` | 08:00 | Session open time (IST) |
-| `SESSION_END_HOUR/MINUTE` | 20:30 | Session close time (IST) |
+| `SESSION_END_HOUR/MINUTE` | 15:30 | Session close time (IST) |
 | `FIRST_TRADE_HOUR/MINUTE` | 08:10 | Earliest allowed trade (IST) |
 | `TP multiplier` | 4× range | Take-profit distance from range boundary |
 | `Max SL per day` | 3 | After 3 stop-losses, halt trading |
@@ -557,6 +554,7 @@ date,time_ist,symbol,direction,entry_price,exit_price,size_btc,exit_reason,pnl_u
 | `POLL_INTERVAL_SEC` | 0.25s | How often the main loop processes ticks |
 | `EQUITY_REFRESH_INTERVAL_SEC` | 60s | How often account equity is fetched |
 | `TEST_MODE` | `True/False` | Enables manual range override for testing |
+| `DATE_TO_TRADE` | `None` / `"YYYY-MM-DD"` | Set to a specific date to force trading for that day only |
 | `TEST_RANGE` | `{high, low}` | Manually defined range when `TEST_MODE = True` |
 
 ### 18.3 Exchange Constants (`hyperliquid_client.py`)
@@ -586,14 +584,18 @@ Auto/
 │   └── run_breakout_paper.py    # 📄 Paper trading runner
 ├── logs/
 │   ├── trades/
-│   │   └── 2026-03-11_trades.json
-│   └── pnl.csv
+│   │   └── 2026-03-13_trades.json
+│   ├── pnl_2026-03-13.csv
+│   └── heartbeat.txt            # 💓 Live status summary
 ├── data/
 │   └── bot_state.db             # SQLite database
 ├── secrets/
 │   └── .env                     # HL_WALLET_ADDRESS, HL_PRIVATE_KEY
 ├── tests/
-│   └── test_order_lifecycle.py  # Integration test for order placement
+│   ├── test_order_lifecycle.py  # Entry/Exit lifecycle test
+│   ├── test_range_calculation.py# Logic unit test
+│   ├── debug_morning_range.py   # SQL data inspector
+│   └── reset_session.py         # Daily state clear tool
 ├── LIVE_STRATEGY.md             # ← You are here
 └── CHANGELOG.md
 ```
