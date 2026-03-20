@@ -237,6 +237,8 @@ class BreakoutLiveRunner:
                            "exit_type": exit_type,
                            "price": actual_exit_price,
                            "size": size,
+                           "sl": self._strategy.get_state_snapshot().get("virtual_sl"),
+                           "tp": self._strategy.get_state_snapshot().get("virtual_tp"),
                            "response": resp
                        })
                   except Exception as e:
@@ -329,6 +331,10 @@ class BreakoutLiveRunner:
                 else:
                     self._logger.info("✅ Resuming active live position: %s %s.", exch_size, self.symbol)
                     self._logger.info("✅ Active Tracking: SL = %s | TP = %s", s.get("virtual_sl"), s.get("virtual_tp"))
+                    
+                    self._current_entry_price = float(s.get("virtual_entry", 0.0))
+                    self._current_direction = s.get("virtual_side")
+                    self._current_size = float(exch_size)
             else:
                 if exch_size != 0.0:
                     self._logger.warning("⚠️ Exchange position exists (%s %s) but DB says no trade. Bot will NOT manage this bag.", exch_size, self.symbol)
@@ -417,17 +423,19 @@ class BreakoutLiveRunner:
                     in_trade = state.get("virtual_side", "none") if state.get("virtual_in_trade") else "no"
                     range_low = state.get("range_low") or 0
                     range_high = state.get("range_high") or 0
+                    sl_text = f" | SL: ${state.get('virtual_sl'):.0f}" if state.get('virtual_in_trade') else ""
+                    
                     self._logger.info(
-                        "Heartbeat | Price: $%.2f | Range: [%.0f - %.0f] | Armed: %s | InTrade: %s | Eq: $%.2f",
+                        "Heartbeat | Price: $%.2f | Range: [%.0f - %.0f] | Armed: %s | InTrade: %s%s | Eq: $%.2f",
                         float(price), range_low, range_high,
-                        armed, in_trade, self._equity
+                        armed, in_trade, sl_text, self._equity
                     )
                     
                     # Update heartbeat file (overwrite single line)
                     try:
                         with open(self.heartbeat_file, "w") as f:
                             timestamp = datetime.now(IST).strftime("%H:%M:%S")
-                            f.write(f"[{timestamp}] BTC: ${float(price):.2f} | Range: [{range_low:.0f}-{range_high:.0f}] | Status: {state.get('current_state')} | Armed: {armed} | Side: {in_trade} | SLs: {state.get('sl_count')}/3 | TP: {'Hit' if state.get('tp_hit') else 'None'} | Halted: {'Yes' if state.get('halted_for_day') else 'No'} | Eq: ${self._equity:.2f}\n")
+                            f.write(f"[{timestamp}] BTC: ${float(price):.2f} | Range: [{range_low:.0f}-{range_high:.0f}] | Status: {state.get('current_state')} | Armed: {armed} | Side: {in_trade}{sl_text} | SLs: {state.get('sl_count')}/3 | TP: {'Hit' if state.get('tp_hit') else 'None'} | Halted: {'Yes' if state.get('halted_for_day') else 'No'} | Eq: ${self._equity:.2f}\n")
                     except Exception as e:
                         self._logger.warning("Failed to update heartbeat file: %s", e)
                 

@@ -453,11 +453,22 @@ class HyperliquidWSMarketData:
     def _reconnect_loop(self) -> None:
         """
         Periodically check connection; if disconnected and not stopped, reconnect with backoff.
+        Also acts as a Watchdog: force-reconnects if the stream goes totally silent for 15 seconds.
         """
         while not self._stop_event.is_set():
             time.sleep(2.0)
             if self._stop_event.is_set():
                 break
+            
+            # Watchdog: Kill zombie connections that haven't received packets in 15 seconds
+            if self._connected and self._last_message_local_ts is not None:
+                if time.time() - self._last_message_local_ts > 15.0:
+                    self._logger.error("WATCHDOG: Stream dead for 15s! Force closing zombie connection...")
+                    if self._ws:
+                        self._ws.close()
+                    # It will loop around, _connected will be False, and it will reconnect naturally.
+                    continue
+                    
             if self._connected:
                 continue
             if self._expecting_close:

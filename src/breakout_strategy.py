@@ -689,6 +689,8 @@ class BreakoutStrategyEngine:
             "tp_hit": s.tp_hit,
             "sl_count": s.sl_count,
             "halted_for_day": s.halted_for_day,
+            "session_ended": s.session_ended,
+            "session_started": s.session_started,
             "no_trade_reason": s.no_trade_reason,
             "breakout_armed": s.breakout_armed,
             "recent_events": list(s.event_log)[-10:],
@@ -735,6 +737,7 @@ class BreakoutStrategyEngine:
             s.sl_count = meta.get("sl_count", 0)
             s.halted_for_day = meta.get("halted_for_day", False)
             s.session_ended = meta.get("session_ended", False)
+            s.session_started = meta.get("session_started", False)
             s.breakout_armed = meta.get("breakout_armed", False)
             s.no_trade_reason = meta.get("no_trade_reason", "")
             
