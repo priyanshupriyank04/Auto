@@ -42,7 +42,7 @@ TEST_MODE = False
 TEST_RANGE = {"high": 70200.0, "low": 70100.0}
 
 # DATE TO TRADE: Set to "YYYY-MM-DD" to force a specific day, or None for auto-current
-DATE_TO_TRADE = "2026-03-14"
+DATE_TO_TRADE = None
 
 def _setup_logging() -> logging.Logger:
     log = logging.getLogger("run_breakout_live")
@@ -258,8 +258,16 @@ class BreakoutLiveRunner:
                 if r_date == today_date:
                     today_list.append(r)
             
-            if not today_list:
-                self._logger.info("No %s candles for today in DB. Attempting to fetch from API...", interval)
+            # Always fetch if empty, OR if the latest candle is significantly stale (e.g. more than an interval behind)
+            needs_fetch = True
+            if today_list:
+                latest_ot = max(c["open_time"] for c in today_list)
+                allowed_gap_ms = 300_000 if interval == "5m" else 60_000
+                if now_ms - latest_ot < allowed_gap_ms * 1:
+                    needs_fetch = False
+                    
+            if needs_fetch:
+                self._logger.info("Attempting to fetch missing %s candles from API...", interval)
                 try:
                     boot = HistoryBootstrapper(symbol=self.symbol, db_path=DEFAULT_DB_PATH)
                     # Fetch enough to cover the morning (720 min = 12 hours)
@@ -271,7 +279,7 @@ class BreakoutLiveRunner:
                         for f in fetched:
                             f_date = datetime.fromtimestamp(f["open_time"] / 1000.0, tz=timezone.utc).astimezone(IST).strftime("%Y-%m-%d")
                             if f_date == today_date:
-                                # Avoid duplicating if it was somehow in rows but filtered out weirdly (unlikely)
+                                # Avoid duplicating
                                 if not any(x["open_time"] == f["open_time"] for x in today_list):
                                     today_list.append(f)
                         self._logger.info("Fetched and persisted %d %s candles from API", len(fetched), interval)

@@ -7,3 +7,6 @@ plotly
 pandas
 mplfinance
 matplotlib
+eth-account
+setuptools
+git+https://github.com/hyperliquid-dex/hyperliquid-python-sdk.git
