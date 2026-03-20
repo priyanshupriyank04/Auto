@@ -559,7 +559,10 @@ class BreakoutStrategyEngine:
         # Active trade: check TP/SL first
         exit_evt = self._check_virtual_trade_exit(p, timestamp_ms)
         if exit_evt:
-            result["exit"] = exit_evt
+            if exit_evt.get("trailing_update"):
+                result["trailing_update"] = exit_evt
+            else:
+                result["exit"] = exit_evt
             return result
 
         # No active trade: check for arming and breakout entry
@@ -705,8 +708,8 @@ class BreakoutStrategyEngine:
     def load_state(self, date_ist: str | None = None) -> bool:
         """Load internal strategy state from StateStore."""
         try:
-            # Use provided date, or internal target_date, or default global key
-            effective_date = date_ist or self._target_date
+            # Use provided date, or internal target_date, or default to today's IST date
+            effective_date = date_ist or self._target_date or datetime.now(self._tz).strftime("%Y-%m-%d")
             key = self._get_persistence_key(effective_date)
             
             row = self._store.get_component_status(key)

@@ -79,5 +79,9 @@ def fetch_1m_data(coin="BTC", target_date_ist="2026-03-12"):
         print(f"❌ Error fetching data: {e}")
 
 if __name__ == "__main__":
-    # You can change the date here explicitly if needed e.g. "2026-03-12"
-    fetch_1m_data("BTC")
+    # Default to March 12, or allow passing a date via CLI
+    target_date = "2026-03-12"
+    if len(sys.argv) > 1:
+        target_date = sys.argv[1]
+        
+    fetch_1m_data("BTC", target_date)

@@ -312,6 +312,29 @@ class BreakoutLiveRunner:
                                  # Once we've logged it once during replay, we can stop logging duplicates from replay
                                  break 
 
+    def _sync_exchange_position_with_state(self):
+        """Verifies true exchange state with internal state immediately after boot."""
+        self._logger.info("Syncing active position with Hyperliquid...")
+        s = self._strategy.get_state_snapshot()
+        try:
+            positions = self._client.get_positions()
+            rel_pos = next((p for p in positions if p["symbol"] == self.symbol), None)
+            exch_size = float(rel_pos["size"]) if rel_pos else 0.0
+            
+            if s.get("virtual_in_trade"):
+                if exch_size == 0.0:
+                    self._logger.warning("DB says in trade, but actual exchange position is ZERO. Wiping internal trade state.")
+                    self._strategy._state.virtual_in_trade = False
+                    self._strategy.persist_state()
+                else:
+                    self._logger.info("✅ Resuming active live position: %s %s.", exch_size, self.symbol)
+                    self._logger.info("✅ Active Tracking: SL = %s | TP = %s", s.get("virtual_sl"), s.get("virtual_tp"))
+            else:
+                if exch_size != 0.0:
+                    self._logger.warning("⚠️ Exchange position exists (%s %s) but DB says no trade. Bot will NOT manage this bag.", exch_size, self.symbol)
+        except Exception as e:
+            self._logger.error("Failed to sync live exchange position during boot: %s", e)
+
     def start(self):
         trade_date_label = DATE_TO_TRADE or "CURRENT DATE"
         self._logger.info("Starting LIVE runner for %s (Target Day: %s)", self.symbol, trade_date_label)
@@ -325,6 +348,7 @@ class BreakoutLiveRunner:
 
         # 1. Recover last known state from DB
         self._strategy.load_state()
+        self._sync_exchange_position_with_state()
         
         # 2. Replay history to catch up to the current range
         self._replay_today_candles()
@@ -419,11 +443,29 @@ class BreakoutLiveRunner:
 
                 time.sleep(POLL_INTERVAL_SEC)
         except KeyboardInterrupt:
-            self._logger.info("Stopping...")
+            self._logger.info("Stopping via KeyboardInterrupt...")
+            from src.email_alert import send_email_alert
+            send_email_alert("Bot Stopped Manually", "The Hyperliquid Breakout bot was manually stopped via KeyboardInterrupt.")
+        except Exception as e:
+            self._logger.error("Bot crashed with unhandled exception", exc_info=True)
+            from src.email_alert import send_email_alert
+            import traceback
+            tb = traceback.format_exc()
+            send_email_alert("BOT CRASHED", f"The Hyperliquid Breakout bot crashed due to an error:\n\n{e}\n\nTraceback:\n{tb}")
+            raise
         finally:
             self._ws.stop()
             self._store.close()
 
 if __name__ == "__main__":
     runner = BreakoutLiveRunner()
-    runner.start()
+    try:
+        from src.email_alert import send_email_alert
+        send_email_alert("Bot Started", "The Hyperliquid Breakout bot has successfully initialized and is now running active monitoring.")
+        
+        runner.start()
+        # If it reached here normally, it was a graceful shutdown (e.g. Session Ended)
+        send_email_alert("Session Ended", "The Hyperliquid Breakout bot successfully completed its session and shut down gracefully.")
+    except Exception:
+        # Prevent the double-raise crashing the very bottom if not caught neatly
+        pass
