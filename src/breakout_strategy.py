@@ -527,10 +527,6 @@ class BreakoutStrategyEngine:
             if self._state.current_state == WEEKEND_NO_TRADE:
                 return result
 
-        if self._state.halted_for_day:
-            result["halt_or_session_ended"] = True
-            return result
-        
         # Session end check
         if self._is_after_session_end_ist(dt_ist):
             if not self._state.session_ended:
@@ -552,6 +548,10 @@ class BreakoutStrategyEngine:
                     }
             else:
                 result["session_ended"] = True
+            return result
+
+        if self._state.halted_for_day:
+            result["halt_or_session_ended"] = True
             return result
 
         self._state.last_live_ts_ms = timestamp_ms

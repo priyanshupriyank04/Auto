@@ -389,11 +389,13 @@ class BreakoutLiveRunner:
                 self._update_equity()
                 snapshot = self._ws.get_latest_snapshot()
                 
-                # Extract price
-                price = snapshot.get("last_price") or snapshot.get("mid")
-                if not price:
+                # Extract price — WS snapshot stores as str; must convert to float
+                # for CandleBuilder which requires numeric types
+                raw_price = snapshot.get("last_price") or snapshot.get("mid")
+                if not raw_price:
                     time.sleep(POLL_INTERVAL_SEC)
                     continue
+                price = float(raw_price)
                 
                 ts_ms = snapshot.get("exchange_ts") or int(time.time() * 1000)
                 
@@ -401,8 +403,13 @@ class BreakoutLiveRunner:
                 cb_res = self._candle_builder.process_tick(price, ts_ms)
                 new_5m = cb_res.get("new_5m_closed")
                 if new_5m:
+                    self._logger.info(">>> 5M CANDLE CLOSED! open_time=%s close_time=%s O=%.2f H=%.2f L=%.2f C=%.2f",
+                                     new_5m["open_time"], new_5m["close_time"],
+                                     float(new_5m["open"]), float(new_5m["high"]),
+                                     float(new_5m["low"]), float(new_5m["close"]))
                     self._store.save_closed_candle(new_5m)
                     evt = self._strategy.process_closed_5m_candle(new_5m)
+                    self._logger.info(">>> STRATEGY RESPONSE to 5m candle: %s", evt)
                     if evt.get("pair_found"):
                          # Log live range discovery
                          self._trade_logger.log_event("range_identified", {
