@@ -397,7 +397,6 @@ class BreakoutStrategyEngine:
         self._state.virtual_entry = p
         self._state.virtual_sl = self._state.range_low
         self._state.virtual_tp = self._round_price(self._state.range_high + 4.0 * self._state.range_size)
-        self._state.breakout_armed = False # Reset arming for next trade (if SL hit)
         self._state_transition(LONG_ACTIVE, "breakout_above_range")
         self._record_event("paper_long_entry", {"price": p, "sl": self._state.virtual_sl, "tp": self._state.virtual_tp})
         self._logger.info("paper_long_entry price=%.2f sl=%.2f tp=%.2f", p, self._state.virtual_sl, self._state.virtual_tp)
@@ -414,7 +413,6 @@ class BreakoutStrategyEngine:
         self._state.virtual_entry = p
         self._state.virtual_sl = self._state.range_high
         self._state.virtual_tp = self._round_price(self._state.range_low - 4.0 * self._state.range_size)
-        self._state.breakout_armed = False # Reset arming for next trade (if SL hit)
         self._state_transition(SHORT_ACTIVE, "breakout_below_range")
         self._record_event("paper_short_entry", {"price": p, "sl": self._state.virtual_sl, "tp": self._state.virtual_tp})
         self._logger.info("paper_short_entry price=%.2f sl=%.2f tp=%.2f", p, self._state.virtual_sl, self._state.virtual_tp)
@@ -565,32 +563,17 @@ class BreakoutStrategyEngine:
                 result["exit"] = exit_evt
             return result
 
-        # No active trade: check for arming and breakout entry
+        # No active trade: check for breakout entry
         if not self._state.virtual_in_trade:
             # Skip if no range defined yet
             if self._state.range_low is None or self._state.range_high is None:
                 return result
             
-            # 1. ARMING: Price must be seen inside the range to arm the trigger
-            if self._state.range_low <= p <= self._state.range_high:
-                if not self._state.breakout_armed:
-                    self._state.breakout_armed = True
-                    self._logger.info("breakout_armed: price %.2f inside range [%.2f, %.2f]", 
-                                     p, self._state.range_low, self._state.range_high)
-                    self._record_event("breakout_armed", {"price": p})
-                    result["armed_update"] = True
-
-            # 2. TRIGGER: Only enter if armed
-            if self._state.breakout_armed:
-                if p > self._state.range_high:
-                    result["entry"] = self._enter_virtual_long(p, timestamp_ms, equity=equity)
-                elif p < self._state.range_low:
-                    result["entry"] = self._enter_virtual_short(p, timestamp_ms, equity=equity)
-            else:
-                # Still waiting for price to enter the range
-                if self.loop_iterations_local % 40 == 0: # Log occasionally
-                     self._logger.debug("waiting_for_range_entry: price %.2f range [%.2f, %.2f]", 
-                                      p, self._state.range_low, self._state.range_high)
+            # Check for breakout entry (no arming gate — fires immediately on range cross)
+            if p > self._state.range_high:
+                result["entry"] = self._enter_virtual_long(p, timestamp_ms, equity=equity)
+            elif p < self._state.range_low:
+                result["entry"] = self._enter_virtual_short(p, timestamp_ms, equity=equity)
 
 
         return result
