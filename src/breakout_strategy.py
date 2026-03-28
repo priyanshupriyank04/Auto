@@ -397,9 +397,13 @@ class BreakoutStrategyEngine:
         self._state.virtual_entry = p
         self._state.virtual_sl = self._state.range_low
         self._state.virtual_tp = self._round_price(self._state.range_high + 4.0 * self._state.range_size)
+        
+        # DISARM after entry: must return to range to enter again
+        self._state.breakout_armed = False
+        
         self._state_transition(LONG_ACTIVE, "breakout_above_range")
         self._record_event("paper_long_entry", {"price": p, "sl": self._state.virtual_sl, "tp": self._state.virtual_tp})
-        self._logger.info("paper_long_entry price=%.2f sl=%.2f tp=%.2f", p, self._state.virtual_sl, self._state.virtual_tp)
+        self._logger.info("paper_long_entry price=%.2f sl=%.2f tp=%.2f (DISARMED)", p, self._state.virtual_sl, self._state.virtual_tp)
         
         size = self._pos_manager.calculate_size(equity if equity is not None else 1000.0, p)
         return {"signal": "long_entry", "price": p, "sl": self._state.virtual_sl, "tp": self._state.virtual_tp, "size": size}
@@ -413,9 +417,13 @@ class BreakoutStrategyEngine:
         self._state.virtual_entry = p
         self._state.virtual_sl = self._state.range_high
         self._state.virtual_tp = self._round_price(self._state.range_low - 4.0 * self._state.range_size)
+        
+        # DISARM after entry: must return to range to enter again
+        self._state.breakout_armed = False
+        
         self._state_transition(SHORT_ACTIVE, "breakout_below_range")
         self._record_event("paper_short_entry", {"price": p, "sl": self._state.virtual_sl, "tp": self._state.virtual_tp})
-        self._logger.info("paper_short_entry price=%.2f sl=%.2f tp=%.2f", p, self._state.virtual_sl, self._state.virtual_tp)
+        self._logger.info("paper_short_entry price=%.2f sl=%.2f tp=%.2f (DISARMED)", p, self._state.virtual_sl, self._state.virtual_tp)
         
         size = self._pos_manager.calculate_size(equity if equity is not None else 1000.0, p)
         return {"signal": "short_entry", "price": p, "sl": self._state.virtual_sl, "tp": self._state.virtual_tp, "size": size}
@@ -460,8 +468,16 @@ class BreakoutStrategyEngine:
             if p <= self._state.virtual_sl:
                 self._state.virtual_in_trade = False
                 self._state.sl_count += 1
-                self._record_event("paper_sl_hit", {"side": "long", "price": p, "sl_count": self._state.sl_count})
                 self._logger.info("paper_sl_hit long price=%.2f sl_count=%s", p, self._state.sl_count)
+                
+                # Check for auto-arm if closed inside original range
+                rl, rh = self._state.range_low, self._state.range_high
+                if rl is not None and rh is not None and rl <= p <= rh:
+                    self._state.breakout_armed = True
+                    self._logger.info("auto_armed: closed inside original range at %.2f", p)
+                else:
+                    self._state.breakout_armed = False
+
                 if self._state.sl_count >= 3:
                     self._state.halted_for_day = True
                     self._state_transition(HALTED_FOR_DAY, "3_sl_hits")
@@ -480,8 +496,16 @@ class BreakoutStrategyEngine:
             if p >= self._state.virtual_sl:
                 self._state.virtual_in_trade = False
                 self._state.sl_count += 1
-                self._record_event("paper_sl_hit", {"side": "short", "price": p, "sl_count": self._state.sl_count})
                 self._logger.info("paper_sl_hit short price=%.2f sl_count=%s", p, self._state.sl_count)
+                
+                # Check for auto-arm if closed inside original range
+                rl, rh = self._state.range_low, self._state.range_high
+                if rl is not None and rh is not None and rl <= p <= rh:
+                    self._state.breakout_armed = True
+                    self._logger.info("auto_armed: closed inside original range at %.2f", p)
+                else:
+                    self._state.breakout_armed = False
+
                 if self._state.sl_count >= 3:
                     self._state.halted_for_day = True
                     self._state_transition(HALTED_FOR_DAY, "3_sl_hits")
@@ -569,11 +593,21 @@ class BreakoutStrategyEngine:
             if self._state.range_low is None or self._state.range_high is None:
                 return result
             
-            # Check for breakout entry (no arming gate — fires immediately on range cross)
-            if p > self._state.range_high:
-                result["entry"] = self._enter_virtual_long(p, timestamp_ms, equity=equity)
-            elif p < self._state.range_low:
-                result["entry"] = self._enter_virtual_short(p, timestamp_ms, equity=equity)
+            # ARMING GATE: If not armed, check if price returned to range
+            if not self._state.breakout_armed:
+                rl, rh = self._state.range_low, self._state.range_high
+                if rl is not None and rh is not None:
+                    if rl <= p <= rh:
+                        self._state.breakout_armed = True
+                        self._logger.info("breakout_armed: price returned inside range at %.2f", p)
+                        self._record_event("breakout_armed_by_range_return", {"price": p})
+            
+            # Only enter if ARMED
+            if self._state.breakout_armed:
+                if self._state.range_high is not None and p > self._state.range_high:
+                    result["entry"] = self._enter_virtual_long(p, timestamp_ms, equity=equity)
+                elif self._state.range_low is not None and p < self._state.range_low:
+                    result["entry"] = self._enter_virtual_short(p, timestamp_ms, equity=equity)
 
 
         return result
