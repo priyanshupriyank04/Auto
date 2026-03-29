@@ -44,5 +44,7 @@ services:  # The LIVE Trading Bot
     command:
       - http
       - dashboard:8501
+    ports:
+      - "14040:4040"
     depends_on:
       - dashboard

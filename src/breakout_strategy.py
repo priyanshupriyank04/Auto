@@ -470,13 +470,14 @@ class BreakoutStrategyEngine:
                 self._state.sl_count += 1
                 self._logger.info("paper_sl_hit long price=%.2f sl_count=%s", p, self._state.sl_count)
                 
-                # Check for auto-arm if closed inside original range
-                rl, rh = self._state.range_low, self._state.range_high
-                if rl is not None and rh is not None and rl <= p <= rh:
+                # Auto-arm only if SL was the original range boundary (not a trailing SL)
+                is_original_sl = (self._state.virtual_sl == self._state.range_low)
+                if is_original_sl:
                     self._state.breakout_armed = True
-                    self._logger.info("auto_armed: closed inside original range at %.2f", p)
+                    self._logger.info("auto_armed: original range SL hit (long) at %.2f", p)
                 else:
                     self._state.breakout_armed = False
+                    self._logger.info("not_armed: trailing SL hit (long) at %.2f, waiting for price to return to range", p)
 
                 if self._state.sl_count >= 3:
                     self._state.halted_for_day = True
@@ -498,13 +499,14 @@ class BreakoutStrategyEngine:
                 self._state.sl_count += 1
                 self._logger.info("paper_sl_hit short price=%.2f sl_count=%s", p, self._state.sl_count)
                 
-                # Check for auto-arm if closed inside original range
-                rl, rh = self._state.range_low, self._state.range_high
-                if rl is not None and rh is not None and rl <= p <= rh:
+                # Auto-arm only if SL was the original range boundary (not a trailing SL)
+                is_original_sl = (self._state.virtual_sl == self._state.range_high)
+                if is_original_sl:
                     self._state.breakout_armed = True
-                    self._logger.info("auto_armed: closed inside original range at %.2f", p)
+                    self._logger.info("auto_armed: original range SL hit (short) at %.2f", p)
                 else:
                     self._state.breakout_armed = False
+                    self._logger.info("not_armed: trailing SL hit (short) at %.2f, waiting for price to return to range", p)
 
                 if self._state.sl_count >= 3:
                     self._state.halted_for_day = True

@@ -8,8 +8,8 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 from streamlit_autorefresh import st_autorefresh
 
-# Refresh every 10 seconds
-st_autorefresh(interval=10000, key="data_refresh")
+# Refresh every 5 seconds
+st_autorefresh(interval=5000, key="data_refresh")
 
 # --- Constants & Config ---
 IST = ZoneInfo("Asia/Kolkata")
