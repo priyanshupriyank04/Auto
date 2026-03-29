@@ -453,6 +453,15 @@ class BreakoutLiveRunner:
                 # Auto-shutdown: Check if session ended and we are not in trade
                 if res.get("session_ended") and not self._strategy.get_state_snapshot().get("virtual_in_trade"):
                      self._logger.info("Session ended and any positions closed. Shutting down runner.")
+                     # Write final heartbeat so dashboard shows session-ended state
+                     try:
+                         state = self._strategy.get_state_snapshot()
+                         with open(self.heartbeat_file, "w") as f:
+                             timestamp = datetime.now(IST).strftime("%H:%M:%S")
+                             f.write(f"[{timestamp}] BTC: ${float(price):.2f} | Range: [{state.get('range_low', 0):.0f}-{state.get('range_high', 0):.0f}] | Status: {state.get('current_state')} | Armed: waiting | Side: no | SLs: {state.get('sl_count')}/3 | TP: {'Hit' if state.get('tp_hit') else 'None'} | Halted: {'Yes' if state.get('halted_for_day') else 'No'} | Eq: ${self._equity:.2f}\n")
+                     except Exception as e:
+                         self._logger.warning("Failed to write final heartbeat: %s", e)
+                     self._strategy.persist_state()
                      self._running = False
                      break
 
