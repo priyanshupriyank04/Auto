@@ -11,6 +11,7 @@ No live orders; strategy emits signals and state only.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -419,6 +420,22 @@ class BreakoutPaperRunner:
         if self._strategy:
             summary = self._strategy.get_compact_summary()
             self._logger.info("heartbeat strategy: %s", summary)
+            
+            # Update heartbeat file for dashboard
+            try:
+                os.makedirs("logs", exist_ok=True)
+                with open("logs/heartbeat.txt", "w") as f:
+                    timestamp = datetime.now(IST).strftime("%H:%M:%S")
+                    state = self._strategy.get_state_snapshot()
+                    armed = "ARMED" if state.get("breakout_armed") else "waiting"
+                    in_trade = state.get("virtual_side", "none") if state.get("virtual_in_trade") else "no"
+                    range_low = state.get("range_low") or 0
+                    range_high = state.get("range_high") or 0
+                    sl_text = f" | SL: ${state.get('virtual_sl'):.0f}" if state.get('virtual_in_trade') else ""
+                    f.write(f"[{timestamp}] BTC: ${float(self._last_price or 0):.2f} | Range: [{range_low:.0f}-{range_high:.0f}] | Status: {state.get('current_state')} | Armed: {armed} | Side: {in_trade}{sl_text} | SLs: {state.get('sl_count')}/3 | TP: {'Hit' if state.get('tp_hit') else 'None'} | Halted: {'Yes' if state.get('halted_for_day') else 'No'} | Eq: ${0:.2f}\n")
+            except Exception as e:
+                self._logger.warning("Failed to update heartbeat file: %s", e)
+
         self._logger.info(
             "heartbeat iterations=%s ticks=%s last_price_time=%s last_candle_time=%s last_event=%s",
             self.loop_iterations,
