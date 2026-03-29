@@ -6,6 +6,10 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
+from streamlit_autorefresh import st_autorefresh
+
+# Refresh every 10 seconds
+st_autorefresh(interval=10000, key="data_refresh")
 
 # --- Constants & Config ---
 IST = ZoneInfo("Asia/Kolkata")
@@ -344,15 +348,4 @@ elif nav == "History":
             else:
                 st.info("No activity JSON found for this date.")
 
-# Auto-refresh every 10 seconds browser-side
-st.empty() # Placeholder for refresh
-st.markdown(
-    f"""
-    <script>
-        setTimeout(function() {{
-            window.location.reload();
-        }}, 10000);
-    </script>
-    """,
-    unsafe_allow_html=True
-)
+# Auto-refresh handled by st_autorefresh at top
