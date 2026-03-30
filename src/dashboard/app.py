@@ -274,9 +274,10 @@ if nav == "Live Dashboard":
     with c2:
         # Halted state warning
         if h_data["halted"] == "Yes":
-            st.error("⚠️ Trading Halted for Day (Max SLs Hit)")
-        elif h_data["tp"] != "None":
-            st.success("🎯 Take Profit Hit!")
+            if h_data["tp"] == "Hit":
+                st.success("🎯 Trading Halted for Day (Target Hit!)")
+            else:
+                st.error("⚠️ Trading Halted for Day (Max SLs Hit)")
     
     # 4. Tables Section
     tab1, tab2, tab3 = st.tabs(["📊 Closed Trades (PnL)", "📝 Activity Log (JSON)", "💻 Raw Heartbeat"])
