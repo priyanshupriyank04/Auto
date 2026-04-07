@@ -48,3 +48,23 @@ services:  # The LIVE Trading Bot
       - "14040:4040"
     depends_on:
       - dashboard
+
+  # FastAPI live log sidecar
+  liveapi:
+    build: .
+    container_name: hl-breakout-liveapi
+    command: uvicorn serve_live:app --host 0.0.0.0 --port ${SERVE_PORT:-8100}
+    restart: always
+    env_file:
+      - secrets/.env
+    environment:
+      - PYTHONPATH=/app
+      - TZ=Asia/Kolkata
+      - LOGS_DIR=/app/logs
+      - SERVE_PORT=8100
+    ports:
+      - "18100:8100"
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      - bot
