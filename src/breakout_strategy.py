@@ -93,6 +93,7 @@ class DailyState:
     halted_for_day: bool = False
     session_ended: bool = False
     breakout_armed: bool = False  # True only after price is seen inside [range_low, range_high]
+    trailing_exit_blocked_side: str = ""  # "long" or "short" — blocks same-direction re-entry after trailing SL exit
     last_processed_5m_open_time: int | None = None
     last_live_ts_ms: int | None = None
     event_log: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=MAX_EVENT_LOG))
@@ -474,10 +475,12 @@ class BreakoutStrategyEngine:
                 is_original_sl = (self._state.virtual_sl == self._state.range_low)
                 if is_original_sl:
                     self._state.breakout_armed = True
+                    self._state.trailing_exit_blocked_side = ""  # clear block — clean SL
                     self._logger.info("auto_armed: original range SL hit (long) at %.2f", p)
                 else:
                     self._state.breakout_armed = False
-                    self._logger.info("not_armed: trailing SL hit (long) at %.2f, waiting for price to return to range", p)
+                    self._state.trailing_exit_blocked_side = "long"  # block same-direction re-entry
+                    self._logger.info("not_armed: trailing SL hit (long) at %.2f, blocking long re-entry until opposite trade", p)
 
                 if self._state.sl_count >= 3:
                     self._state.halted_for_day = True
@@ -503,10 +506,12 @@ class BreakoutStrategyEngine:
                 is_original_sl = (self._state.virtual_sl == self._state.range_high)
                 if is_original_sl:
                     self._state.breakout_armed = True
+                    self._state.trailing_exit_blocked_side = ""  # clear block — clean SL
                     self._logger.info("auto_armed: original range SL hit (short) at %.2f", p)
                 else:
                     self._state.breakout_armed = False
-                    self._logger.info("not_armed: trailing SL hit (short) at %.2f, waiting for price to return to range", p)
+                    self._state.trailing_exit_blocked_side = "short"  # block same-direction re-entry
+                    self._logger.info("not_armed: trailing SL hit (short) at %.2f, blocking short re-entry until opposite trade", p)
 
                 if self._state.sl_count >= 3:
                     self._state.halted_for_day = True
@@ -607,9 +612,23 @@ class BreakoutStrategyEngine:
             # Only enter if ARMED
             if self._state.breakout_armed:
                 if self._state.range_high is not None and p > self._state.range_high:
-                    result["entry"] = self._enter_virtual_long(p, timestamp_ms, equity=equity)
+                    if self._state.trailing_exit_blocked_side == "long":
+                        self._logger.debug("long_entry_blocked: trailing SL exit blocked same-direction re-entry at %.2f", p)
+                    else:
+                        result["entry"] = self._enter_virtual_long(p, timestamp_ms, equity=equity)
+                        # Successful entry in opposite direction clears the block
+                        if self._state.trailing_exit_blocked_side:
+                            self._logger.info("trailing_exit_block cleared: entered long (was blocked=%s)", self._state.trailing_exit_blocked_side)
+                            self._state.trailing_exit_blocked_side = ""
                 elif self._state.range_low is not None and p < self._state.range_low:
-                    result["entry"] = self._enter_virtual_short(p, timestamp_ms, equity=equity)
+                    if self._state.trailing_exit_blocked_side == "short":
+                        self._logger.debug("short_entry_blocked: trailing SL exit blocked same-direction re-entry at %.2f", p)
+                    else:
+                        result["entry"] = self._enter_virtual_short(p, timestamp_ms, equity=equity)
+                        # Successful entry in opposite direction clears the block
+                        if self._state.trailing_exit_blocked_side:
+                            self._logger.info("trailing_exit_block cleared: entered short (was blocked=%s)", self._state.trailing_exit_blocked_side)
+                            self._state.trailing_exit_blocked_side = ""
 
 
         return result
@@ -644,6 +663,7 @@ class BreakoutStrategyEngine:
             "halted_for_day": s.halted_for_day,
             "session_ended": s.session_ended,
             "breakout_armed": s.breakout_armed,
+            "trailing_exit_blocked_side": s.trailing_exit_blocked_side,
             "last_processed_5m_open_time": s.last_processed_5m_open_time,
             "last_live_ts_ms": s.last_live_ts_ms,
             "event_log": list(s.event_log),
@@ -666,6 +686,7 @@ class BreakoutStrategyEngine:
             "tp_hit": s.tp_hit,
             "sl_count": s.sl_count,
             "halted": s.halted_for_day,
+            "blocked_side": s.trailing_exit_blocked_side,
         }
 
     def is_tradable_now(self, timestamp_ms: int) -> bool:
@@ -712,6 +733,7 @@ class BreakoutStrategyEngine:
             "session_started": s.session_started,
             "no_trade_reason": s.no_trade_reason,
             "breakout_armed": s.breakout_armed,
+            "trailing_exit_blocked_side": s.trailing_exit_blocked_side,
             "recent_events": list(s.event_log)[-10:],
         }
         try:
@@ -758,6 +780,7 @@ class BreakoutStrategyEngine:
             s.session_ended = meta.get("session_ended", False)
             s.session_started = meta.get("session_started", False)
             s.breakout_armed = meta.get("breakout_armed", False)
+            s.trailing_exit_blocked_side = meta.get("trailing_exit_blocked_side", "")
             s.no_trade_reason = meta.get("no_trade_reason", "")
             
             events = meta.get("recent_events", [])
@@ -784,6 +807,7 @@ class BreakoutStrategyEngine:
             self._state.virtual_in_trade = False
             self._state.virtual_side = None
             self._state.breakout_armed = True  # Auto-arm so breakout fires immediately
+            self._state.trailing_exit_blocked_side = ""  # Clear any direction block
             self._state.halted_for_day = False  # Clear halt from previous SLs
             self._state.sl_count = 0  # Reset SL counter
             self._state.session_ended = False  # Clear session end flag
