@@ -15,3 +15,5 @@ tests/*.csv
 tests/*.json
 
 .DS_Store
+
+scheduler.log
