@@ -1,0 +1,10 @@
+version: "3"
+tunnels:
+  dashboard:
+    proto: http
+    addr: dashboard:8501
+    domain: ocellated-unapologetic-leonida.ngrok-free.dev
+  liveapi:
+    proto: http
+    addr: liveapi:8100
+    domain: crypto-surge-8-api.ngrok.app

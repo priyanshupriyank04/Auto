@@ -34,7 +34,7 @@ services:  # The LIVE Trading Bot
     depends_on:
       - bot
 
-  # Ngrok for remote access
+  # Ngrok for remote access (dashboard + liveapi)
   ngrok:
     image: ngrok/ngrok:latest
     container_name: hl-breakout-ngrok
@@ -42,12 +42,16 @@ services:  # The LIVE Trading Bot
     env_file:
       - secrets/.env
     command:
-      - http
-      - dashboard:8501
+      - start
+      - --all
+      - --config=/ngrok.yml
+    volumes:
+      - ./ngrok.yml:/ngrok.yml
     ports:
       - "14040:4040"
     depends_on:
       - dashboard
+      - liveapi
 
   # FastAPI live log sidecar
   liveapi:
